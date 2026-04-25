@@ -1,4 +1,7 @@
+import subprocess
+import threading
 from dotenv import load_dotenv
+from version import VERSION, BUILD_DATE
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -330,15 +333,40 @@ def process_response(reply: str, history: list) -> str:
     return final_reply
 
 
+def _check_for_updates():
+    """Silently check if remote has new commits. Prints one line if behind."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        local = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        remote = subprocess.check_output(
+            ["git", "rev-parse", "origin/main"],
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if local != remote:
+            console.print("[dim yellow]update available — run scripts/update.sh[/dim yellow]")
+    except Exception:
+        pass
+
+
 def run():
     console.print(Panel(
-        "[bold red]ClawStrike OS[/bold red] [dim]v0.1 — agent ready[/dim]\n"
-        f"[dim]provider: {cfg.provider}  |  model: {cfg.model}[/dim]\n\n"
+        f"[bold red]ClawStrike OS[/bold red] [dim]v{VERSION} — agent ready[/dim]\n"
+        f"[dim]provider: {cfg.provider}  |  model: {cfg.model}  |  build: {BUILD_DATE}[/dim]\n\n"
         "[dim]commands: [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
         "[bold]scope clear[/bold][dim] · [/dim][bold]summary [target][/bold][dim] · [/dim]"
         "[bold]report <target>[/bold][dim] · [/dim][bold]exit[/bold]",
         border_style="red"
     ))
+
+    threading.Thread(target=_check_for_updates, daemon=True).start()
 
     history = []
 
