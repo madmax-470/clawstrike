@@ -1,0 +1,28 @@
+# ClawStrike OS — Configuration
+# Switch your entire AI backend by changing `provider` and filling the matching block.
+
+# ── Provider ──────────────────────────────────────────────────────────────────
+# Options: anthropic | openai | ollama
+provider: anthropic
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+anthropic:
+  api_key: ""          # leave blank to fall back to ANTHROPIC_API_KEY env var
+  model: claude-opus-4-6
+
+# ── OpenAI ────────────────────────────────────────────────────────────────────
+openai:
+  api_key: ""          # leave blank to fall back to OPENAI_API_KEY env var
+  model: gpt-4o
+
+# ── Ollama (local) ────────────────────────────────────────────────────────────
+ollama:
+  base_url: http://localhost:11434/v1
+  model: llama3.1
+  api_key: ollama      # required by openai SDK but ignored by ollama
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+tools:
+  nmap_timeout: 120
+  gobuster_timeout: 120
+  gobuster_wordlist: /usr/share/wordlists/dirb/common.txt
