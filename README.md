@@ -1,6 +1,6 @@
 # ClawStrike OS
 
-An agentic AI pentesting environment powered by Claude (or any OpenAI-compatible model). ClawStrike runs a conversational loop where you describe a target and the agent autonomously plans, executes, and chains security tools — then feeds the results back to the LLM for analysis.
+An agentic AI pentesting environment powered by Claude (or any OpenAI-compatible model). ClawStrike runs a conversational loop where you describe a target and the agent autonomously plans, executes, and chains security tools then feeds the results back to the LLM for analysis.
 
 ---
 
