@@ -18,13 +18,13 @@ from agent.memory.store import save_engagement, load_engagements
 from agent.core.planner import decide_next_tools
 from agent.core.scope import ScopeManager
 from agent.reports.generator import generate_report
-from agent.core.config import load_config, build_client, chat
+from agent.core.config import load_config, ModelConfig, save_workflow_config
+from agent.core.router import ModelRouter
 
 load_dotenv()
 console = Console()
 
 cfg    = load_config()
-client = build_client(cfg)
 scope  = ScopeManager()
 
 SYSTEM_PROMPT = """You are ClawStrike, an elite agentic AI running inside a
@@ -340,7 +340,6 @@ def handle_tool_call(tool_line: str) -> tuple:
 
             console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] msf search — {query} {version or ''}")
 
-            # treat query as CVE if it looks like one, otherwise service
             is_cve = query.upper().startswith("CVE-") or query.upper().startswith("CVE")
             matches, msf_err = msf.search_exploit(
                 cve=query if is_cve else None,
@@ -360,7 +359,6 @@ def handle_tool_call(tool_line: str) -> tuple:
             lhost        = parts[3]
             extra        = parts[4:] if len(parts) > 4 else []
 
-            # parse optional lport / payload from extra positional args
             options: dict = {}
             if extra:
                 options["lport"] = extra[0]
@@ -405,10 +403,10 @@ def handle_tool_call(tool_line: str) -> tuple:
         return f"ERROR: tool execution failed — {str(e)}", {}
 
 
-def process_response(reply: str, history: list) -> str:
+def process_response(reply: str, history: list, router: ModelRouter) -> str:
     """
     Check if agent wants to call a tool.
-    If yes, run it and feed result back to agent.
+    If yes, run it and feed result back to agent (using smart model for analysis).
     If no, return reply as-is.
     """
     if not reply:
@@ -420,7 +418,6 @@ def process_response(reply: str, history: list) -> str:
     if not tool_lines:
         return reply
 
-    # execute each tool call
     tool_results = []
     tool_metas = []
     for tool_line in tool_lines:
@@ -433,10 +430,8 @@ def process_response(reply: str, history: list) -> str:
             ev_path = evidence.save_command_output(tool_line, output, meta["target"])
             console.print(f"[dim green]evidence saved → {ev_path}[/dim green]")
 
-    # feed results back to agent
     tool_output = "\n\n".join(tool_results)
 
-    # run planner on nmap results — auto-execute or suggest follow-up tools
     planner_notes = []
     for meta in tool_metas:
         if meta.get("tool") == "nmap_scan":
@@ -496,13 +491,12 @@ def process_response(reply: str, history: list) -> str:
     })
 
     with console.status("[dim]agent analyzing results...[/dim]", spinner="dots"):
-        final_reply = chat(client, cfg, SYSTEM_PROMPT, history)
+        final_reply = router.chat("analyze", SYSTEM_PROMPT, history)
     history.append({
         "role": "assistant",
         "content": final_reply
     })
 
-    # save engagement for every nmap scan
     for meta in tool_metas:
         if meta.get("tool") == "nmap_scan" and "scan_result" in meta:
             path = save_engagement(
@@ -512,6 +506,85 @@ def process_response(reply: str, history: list) -> str:
             console.print(f"\n[dim green]engagement saved → {path}[/dim green]")
 
     return final_reply
+
+
+def _workflow_wizard() -> None:
+    """
+    Interactive first-run wizard to choose single vs multi-model workflow.
+    Saves the choice to config.yaml.
+    """
+    console.print("\n" + "─" * 60)
+    console.print("[bold cyan]ClawStrike — Workflow Setup[/bold cyan]\n")
+    console.print("Choose your workflow:\n")
+    console.print("  [bold white][1][/bold white] [bold]Single Model[/bold] — one AI handles everything")
+    console.print("      (simpler, higher cost)\n")
+    console.print("  [bold white][2][/bold white] [bold]Multi-Model[/bold] — different AI for different tasks")
+    console.print("      (cost effective, recommended)")
+    console.print("      [dim]→ Fast/free model: recon, scanning, enumeration[/dim]")
+    console.print("      [dim]→ Smart model:     analysis, exploitation planning, reports[/dim]")
+    console.print()
+
+    while True:
+        choice = console.input("[bold yellow]Enter choice [1/2] → [/bold yellow]").strip()
+        if choice in ("1", "2"):
+            break
+        console.print("[dim red]Please enter 1 or 2.[/dim red]")
+
+    if choice == "1":
+        save_workflow_config("single", None, None)
+        console.print("\n[bold green]✓ Single-model workflow saved.[/bold green]")
+        return
+
+    # ── Multi-model setup ──────────────────────────────────────────────────────
+    console.print("\n[bold cyan]FAST MODEL[/bold cyan] [dim](recon, scanning, enumeration)[/dim]")
+    console.print("[dim]Suggested: ollama (free), groq (free tier), deepseek (cheap), mistral free[/dim]\n")
+
+    fast_provider = console.input("  Fast model provider [ollama/groq/deepseek/mistral/openai] → ").strip().lower() or "ollama"
+    fast_model_name = console.input(f"  Fast model name [e.g. qwen2.5-coder:7b] → ").strip() or "qwen2.5-coder:7b"
+
+    fast_api_key = ""
+    fast_base_url = ""
+    if fast_provider == "ollama":
+        fast_base_url = console.input("  Ollama base URL [http://localhost:11434/v1] → ").strip() or "http://localhost:11434/v1"
+        fast_api_key = "ollama"
+    else:
+        fast_api_key = console.input(f"  {fast_provider.capitalize()} API key → ").strip()
+
+    fast = ModelConfig(
+        provider=fast_provider,
+        model=fast_model_name,
+        api_key=fast_api_key,
+        base_url=fast_base_url or None,
+    )
+
+    console.print("\n[bold cyan]SMART MODEL[/bold cyan] [dim](analysis, exploitation planning, reports)[/dim]")
+    console.print("[dim]Suggested: Claude Opus/Sonnet, GPT-4o[/dim]\n")
+
+    smart_provider = console.input("  Smart model provider [anthropic/openai/ollama] → ").strip().lower() or "anthropic"
+    smart_model_name = console.input(f"  Smart model name [e.g. claude-opus-4-6] → ").strip() or "claude-opus-4-6"
+    smart_api_key = console.input(f"  {smart_provider.capitalize()} API key (blank = use env var) → ").strip()
+    smart_base_url = ""
+    if smart_provider not in ("anthropic", "openai"):
+        smart_base_url = console.input("  Base URL (leave blank for default) → ").strip()
+
+    smart = ModelConfig(
+        provider=smart_provider,
+        model=smart_model_name,
+        api_key=smart_api_key,
+        base_url=smart_base_url or None,
+    )
+
+    save_workflow_config("multi", fast, smart)
+
+    console.print(f"\n[bold green]✓ Multi-model workflow saved.[/bold green]")
+    console.print(f"  [dim]fast  → {fast.provider}/{fast.model}[/dim]")
+    console.print(f"  [dim]smart → {smart.provider}/{smart.model}[/dim]")
+    console.print()
+
+    # reload config so router picks up new settings
+    global cfg
+    from agent.core.config import load_config
+    cfg = load_config()
 
 
 def _check_for_updates():
@@ -538,9 +611,33 @@ def _check_for_updates():
 
 
 def run():
+    # ── First-run wizard: ask about workflow if not yet configured ─────────────
+    if cfg.workflow == "single" and cfg.fast_model is None:
+        import yaml
+        from agent.core.config import CONFIG_PATH
+        raw = {}
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH) as f:
+                raw = yaml.safe_load(f) or {}
+        if "workflow" not in raw:
+            _workflow_wizard()
+
+    # ── Re-build router after potential wizard changes ─────────────────────────
+    router = ModelRouter(cfg)
+
+    # ── Startup banner ─────────────────────────────────────────────────────────
+    mode_line = ""
+    if cfg.workflow == "multi":
+        fast_name  = cfg.fast_model.model  if cfg.fast_model  else "?"
+        smart_name = cfg.smart_model.model if cfg.smart_model else "?"
+        mode_line  = f"\n[bold cyan]⚡ multi-model mode:[/bold cyan] [dim]fast=[{fast_name}]  smart=[{smart_name}][/dim]"
+    else:
+        mode_line = f"\n[dim]provider: {cfg.provider}  |  model: {cfg.model}[/dim]"
+
     console.print(Panel(
-        f"[bold red]ClawStrike OS[/bold red] [dim]v{VERSION} — agent ready[/dim]\n"
-        f"[dim]provider: {cfg.provider}  |  model: {cfg.model}  |  build: {BUILD_DATE}[/dim]\n\n"
+        f"[bold red]ClawStrike OS[/bold red] [dim]v{VERSION} — agent ready[/dim]"
+        f"{mode_line}"
+        f"  [dim]build: {BUILD_DATE}[/dim]\n\n"
         "[dim]commands: [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
         "[bold]scope clear[/bold][dim] · [/dim][bold]summary [target][/bold][dim] · [/dim]"
         "[bold]report <target>[/bold][dim] · [/dim][bold]exit[/bold]",
@@ -562,8 +659,8 @@ def run():
             if not user_input.strip():
                 continue
 
-            # built-in command: scope
             cmd = user_input.strip()
+
             if cmd.lower() == "scope show":
                 console.print(f"\n[bold cyan]{scope.show()}[/bold cyan]")
                 continue
@@ -582,7 +679,6 @@ def run():
                     console.print(f"\n[bold green]✓ Scope set:[/bold green] {scope.show()}")
                 continue
 
-            # built-in command: summary [target]
             if cmd.lower() == "summary" or cmd.lower().startswith("summary "):
                 summary_target = cmd[7:].strip() if cmd.lower().startswith("summary ") else None
                 label = summary_target if summary_target else "all targets"
@@ -611,8 +707,8 @@ def run():
                 )
 
                 with console.status("[dim]generating summary...[/dim]", spinner="dots"):
-                    summary = chat(
-                        client, cfg, SYSTEM_PROMPT,
+                    summary = router.chat(
+                        "report", SYSTEM_PROMPT,
                         [{"role": "user", "content": summary_prompt}]
                     )
 
@@ -620,7 +716,6 @@ def run():
                 console.print(Markdown(summary))
                 continue
 
-            # built-in command: report <target>
             if user_input.strip().lower().startswith("report "):
                 target = user_input.strip()[7:].strip()
                 with console.status(f"[dim]generating report for {target}...[/dim]", spinner="dots"):
@@ -637,7 +732,7 @@ def run():
             })
 
             with console.status("[dim]agent thinking...[/dim]", spinner="dots"):
-                reply = chat(client, cfg, SYSTEM_PROMPT, history)
+                reply = router.chat("plan", SYSTEM_PROMPT, history)
 
             if reply is None:
                 console.print("[red]agent returned empty response[/red]")
@@ -648,7 +743,7 @@ def run():
                 "content": reply
             })
 
-            final = process_response(reply, history)
+            final = process_response(reply, history, router)
 
             console.print(f"\n[bold blue]agent →[/bold blue]")
             console.print(Markdown(final))
