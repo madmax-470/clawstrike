@@ -1,7 +1,9 @@
+import shutil
 import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from rich.console import Console
 
@@ -11,12 +13,40 @@ ZAP_PORT = 8090
 ZAP_API_KEY = "clawstrike"
 ZAP_PROXY = f"http://localhost:{ZAP_PORT}"
 
-_ZAP_BINS = [
-    "zap.sh",
-    "/usr/share/zaproxy/zap.sh",
-    "zaproxy",
-    "/opt/zaproxy/zap.sh",
+# Ordered list of well-known ZAP binary locations (config.yaml takes priority)
+_ZAP_KNOWN_PATHS = [
+    "/Applications/ZAP.app/Contents/Java/zap.sh",  # macOS homebrew cask
+    "/usr/share/zaproxy/zap.sh",                    # Debian/Ubuntu apt
+    "/opt/zaproxy/zap.sh",                          # manual Linux install
 ]
+
+
+def _resolve_zap_bin() -> Optional[str]:
+    """
+    Return the first usable ZAP binary path, trying in order:
+      1. tools.zap_path in config.yaml
+      2. Known fixed paths (macOS cask, Debian apt, manual Linux)
+      3. zap.sh / zaproxy on PATH via shutil.which
+    Returns None if nothing is found.
+    """
+    # 1. config.yaml override
+    try:
+        import yaml
+        cfg_path = Path(__file__).resolve().parents[2] / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        zap_path = cfg.get("tools", {}).get("zap_path", "")
+        if zap_path and Path(zap_path).is_file():
+            return zap_path
+    except Exception:
+        pass
+
+    # 2. known fixed paths
+    for candidate in _ZAP_KNOWN_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+
+    # 3. PATH
+    return shutil.which("zap.sh") or shutil.which("zaproxy")
 
 
 @dataclass
@@ -52,32 +82,41 @@ def _ensure_zap_running() -> Optional[str]:
     if _is_zap_up():
         return None
 
-    for zap_bin in _ZAP_BINS:
-        try:
-            subprocess.Popen(
-                [zap_bin, "-daemon", "-port", str(ZAP_PORT),
-                 "-config", f"api.key={ZAP_API_KEY}",
-                 "-config", "api.addrs.addr.name=.*",
-                 "-config", "api.addrs.addr.regex=true"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            console.print(f"[dim]ZAP daemon starting on port {ZAP_PORT}…[/dim]")
-            for _ in range(30):
-                time.sleep(1)
-                if _is_zap_up():
-                    console.print("[dim green]ZAP daemon ready[/dim green]")
-                    return None
-            return f"ZAP started via {zap_bin} but did not respond within 30 seconds"
-        except FileNotFoundError:
-            continue
+    zap_bin = _resolve_zap_bin()
 
-    return (
-        "ZAP not found — install with:\n"
-        "  sudo apt install zaproxy\n"
-        "Or start it manually first:\n"
-        f"  zap.sh -daemon -port {ZAP_PORT} -config api.key={ZAP_API_KEY}"
-    )
+    if zap_bin is None:
+        tried = "\n".join(f"  {p}" for p in _ZAP_KNOWN_PATHS)
+        return (
+            "ZAP binary not found. Tried:\n"
+            f"{tried}\n"
+            "  zap.sh / zaproxy on PATH\n\n"
+            "Fix options:\n"
+            "  macOS  : brew install --cask zap\n"
+            "           (binary will be at /Applications/ZAP.app/Contents/Java/zap.sh)\n"
+            "  Linux  : sudo apt install zaproxy\n"
+            "  Manual : set tools.zap_path in config.yaml to your ZAP binary path\n"
+            f"  Or start ZAP manually: <zap.sh> -daemon -port {ZAP_PORT} "
+            f"-config api.key={ZAP_API_KEY}"
+        )
+
+    try:
+        subprocess.Popen(
+            [zap_bin, "-daemon", "-port", str(ZAP_PORT),
+             "-config", f"api.key={ZAP_API_KEY}",
+             "-config", "api.addrs.addr.name=.*",
+             "-config", "api.addrs.addr.regex=true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        console.print(f"[dim]ZAP daemon starting ({zap_bin}) on port {ZAP_PORT}…[/dim]")
+        for _ in range(30):
+            time.sleep(1)
+            if _is_zap_up():
+                console.print("[dim green]ZAP daemon ready[/dim green]")
+                return None
+        return f"ZAP started via {zap_bin} but did not respond within 30 seconds"
+    except FileNotFoundError:
+        return f"ZAP binary not executable: {zap_bin}"
 
 
 def _get_client():

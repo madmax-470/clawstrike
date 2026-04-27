@@ -26,3 +26,4 @@ tools:
   nmap_timeout: 120
   gobuster_timeout: 120
   gobuster_wordlist: /usr/share/wordlists/dirb/common.txt
+  zap_path: ""             # override ZAP binary path (leave blank for auto-detect)
