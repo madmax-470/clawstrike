@@ -46,6 +46,21 @@ SUGGEST_PORTS = {
     "25":   ("smtp enumeration",   "SMTP open — enumerate users: nmap --script=smtp-enum-users <target>"),
 }
 
+# ports that trigger Metasploit exploit search suggestions (suggest only, never auto-run)
+# values: (service_query, reason_template) — <version> substituted at runtime
+MSF_SUGGEST_PORTS = {
+    "21":   ("ftp",         "FTP open — search for exploits: TOOL_CALL: msf_search ftp <version>"),
+    "22":   ("ssh",         "SSH open — search for exploits: TOOL_CALL: msf_search ssh <version>"),
+    "80":   ("http",        "HTTP open — search for web exploits: TOOL_CALL: msf_search http <version>"),
+    "443":  ("https",       "HTTPS open — search for web exploits: TOOL_CALL: msf_search https <version>"),
+    "445":  ("ms17_010",    "SMB open — check for EternalBlue: TOOL_CALL: msf_search ms17_010"),
+    "3306": ("mysql",       "MySQL open — search for exploits: TOOL_CALL: msf_search mysql <version>"),
+    "3389": ("CVE-2019-0708","RDP open — check for BlueKeep: TOOL_CALL: msf_search CVE-2019-0708"),
+    "5432": ("postgresql",  "PostgreSQL open — search for exploits: TOOL_CALL: msf_search postgresql <version>"),
+    "6379": ("redis",       "Redis open — search for exploits: TOOL_CALL: msf_search redis <version>"),
+    "8080": ("http",        "HTTP alt-port — search for exploits: TOOL_CALL: msf_search http <version>"),
+}
+
 
 def decide_next_tools(scan_result) -> list[Action]:
     """
@@ -85,6 +100,17 @@ def decide_next_tools(scan_result) -> list[Action]:
                 actions.append(Action(
                     type="suggest",
                     tool=tool,
+                    target=target,
+                    reason=reason,
+                ))
+
+            if port in MSF_SUGGEST_PORTS:
+                _, reason_tmpl = MSF_SUGGEST_PORTS[port]
+                version = port_info.get("version", "").strip()
+                reason  = reason_tmpl.replace("<version>", version) if version else reason_tmpl.replace(" <version>", "")
+                actions.append(Action(
+                    type="suggest",
+                    tool="msf_search",
                     target=target,
                     reason=reason,
                 ))

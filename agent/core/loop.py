@@ -12,6 +12,7 @@ from agent.tools.nikto import scan as nikto_scan, format_for_agent as nikto_form
 from agent.tools.hydra import scan as hydra_scan, format_for_agent as hydra_format
 from agent.tools.zap import start_scan as zap_scan, format_for_agent as zap_format
 from agent.tools.mitm import capture_traffic as mitm_capture, format_for_agent as mitm_format
+from agent.tools import metasploit as msf
 from agent.core import evidence
 from agent.memory.store import save_engagement, load_engagements
 from agent.core.planner import decide_next_tools
@@ -72,6 +73,34 @@ TOOL_CALL: zap_scan <target>
 Example: TOOL_CALL: zap_scan http://192.168.1.1
 Example: TOOL_CALL: zap_scan http://10.0.0.5:8080
 After ZAP runs, highlight High and Medium severity alerts and recommend fixes.
+
+TOOL: msf_search
+Use this to search Metasploit for exploit modules matching a service, version, or CVE.
+TOOL_CALL: msf_search <service_or_cve> [version]
+Example: TOOL_CALL: msf_search ssh OpenSSH 7.2
+Example: TOOL_CALL: msf_search CVE-2017-0144
+Example: TOOL_CALL: msf_search ms17_010
+Run this when nmap finds a service version that may have known exploits.
+Never run exploits automatically — always present options to the user first.
+
+TOOL: msf_exploit
+Use this to execute a Metasploit exploit module against a target.
+NEVER run automatically. NEVER suggest without explicit user request.
+The user will be shown exactly what will run and must type "yes" to confirm.
+TOOL_CALL: msf_exploit <module_path> <target> <lhost> [lport] [payload]
+Example: TOOL_CALL: msf_exploit exploit/windows/smb/ms17_010_eternalblue 192.168.1.5 192.168.1.100
+
+TOOL: msf_sessions
+Use this to list all active Metasploit meterpreter and shell sessions.
+TOOL_CALL: msf_sessions
+Run after an exploit to check whether a session was opened.
+
+TOOL: msf_post
+Use this to run a post-exploitation module on an active session.
+NEVER run automatically — only on explicit user request.
+TOOL_CALL: msf_post <session_id> <module_path>
+Example: TOOL_CALL: msf_post 1 post/multi/recon/local_exploit_suggester
+Example: TOOL_CALL: msf_post 1 post/multi/gather/env
 
 TOOL: mitm_capture
 Use this when you need to inspect live HTTP traffic to/from a target — useful for finding hidden endpoints, auth tokens, session cookies, or API calls.
@@ -301,6 +330,74 @@ def handle_tool_call(tool_line: str) -> tuple:
 
             console.print(f"[dim]{output}[/dim]")
             return output, {"tool": "mitm_capture", "target": target}
+
+        if tool_name == "msf_search":
+            if len(parts) < 2:
+                return "ERROR: msf_search requires a service, CVE, or keyword", {}
+
+            query   = parts[1]
+            version = " ".join(parts[2:]) if len(parts) > 2 else None
+
+            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] msf search — {query} {version or ''}")
+
+            # treat query as CVE if it looks like one, otherwise service
+            is_cve = query.upper().startswith("CVE-") or query.upper().startswith("CVE")
+            matches, msf_err = msf.search_exploit(
+                cve=query if is_cve else None,
+                service=None if is_cve else query,
+                version=version,
+            )
+            output = msf.format_for_agent(matches) if not msf_err else f"MSF SEARCH ERROR: {msf_err}"
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "msf_search", "target": query}
+
+        if tool_name == "msf_exploit":
+            if len(parts) < 4:
+                return "ERROR: msf_exploit requires <module> <target> <lhost>", {}
+
+            exploit_path = parts[1]
+            target       = parts[2]
+            lhost        = parts[3]
+            extra        = parts[4:] if len(parts) > 4 else []
+
+            # parse optional lport / payload from extra positional args
+            options: dict = {}
+            if extra:
+                options["lport"] = extra[0]
+            if len(extra) > 1:
+                options["payload"] = extra[1]
+
+            err = _scope_check(target)
+            if err:
+                return err, {}
+
+            result = msf.run_exploit(
+                exploit_path, target, lhost,
+                options=options,
+                scope_check=scope.is_in_scope,
+            )
+            output = msf.format_for_agent(result)
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "msf_exploit", "target": target}
+
+        if tool_name == "msf_sessions":
+            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] msf sessions list")
+            sessions, msf_err = msf.get_sessions()
+            output = msf.format_for_agent(sessions) if not msf_err else f"MSF SESSIONS ERROR: {msf_err}"
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "msf_sessions", "target": "localhost"}
+
+        if tool_name == "msf_post":
+            if len(parts) < 3:
+                return "ERROR: msf_post requires <session_id> <module>", {}
+
+            session_id  = parts[1]
+            post_module = parts[2]
+
+            result = msf.run_post(session_id, post_module)
+            output = msf.format_for_agent(result)
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "msf_post", "target": session_id}
 
         return f"ERROR: unknown tool {tool_name}", {}
 
