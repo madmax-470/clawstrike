@@ -17,10 +17,12 @@ AUTO_RUN_PORTS = {
     "80": [
         ("gobuster_scan", "HTTP detected — running directory brute-force", ""),
         ("nikto_scan",    "HTTP detected — running web vulnerability scan", ""),
+        ("zap_scan",      "HTTP detected — running ZAP active scan", ""),
     ],
     "443": [
         ("gobuster_scan", "HTTPS detected — running directory brute-force", ""),
         ("nikto_scan",    "HTTPS detected — running web vulnerability scan", "-p 443 -ssl"),
+        ("zap_scan",      "HTTPS detected — running ZAP active scan", ""),
     ],
     "8080": [
         ("gobuster_scan", "HTTP alt-port detected — running directory brute-force", ""),

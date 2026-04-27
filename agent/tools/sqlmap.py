@@ -66,10 +66,12 @@ def scan(target: str, flags: str = "") -> SqlmapResult:
             target=target,
             error=(
                 "sqlmap not found — install with:\n"
-                "  pip install sqlmap                  # via pip\n"
-                "  brew install sqlmap                 # macOS\n"
-                "  sudo apt install sqlmap             # Debian/Ubuntu\n"
-                "  git clone https://github.com/sqlmapproject/sqlmap"
+                "  sudo apt install sqlmap\n"
+                "  pip install sqlmap\n\n"
+                "Manual alternative (no tools needed):\n"
+                "  Test boolean: curl '<url>?param=1 AND 1=1' vs '1 AND 1=2'\n"
+                "  Test error:   curl '<url>?param=1\\''\n"
+                "  Test time:    curl '<url>?param=1; SLEEP(5)--'"
             ),
         )
 

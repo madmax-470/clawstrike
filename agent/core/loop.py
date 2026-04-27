@@ -10,6 +10,9 @@ from agent.tools.gobuster import scan as gobuster_scan, format_for_agent as gobu
 from agent.tools.sqlmap import scan as sqlmap_scan, format_for_agent as sqlmap_format
 from agent.tools.nikto import scan as nikto_scan, format_for_agent as nikto_format
 from agent.tools.hydra import scan as hydra_scan, format_for_agent as hydra_format
+from agent.tools.zap import start_scan as zap_scan, format_for_agent as zap_format
+from agent.tools.mitm import capture_traffic as mitm_capture, format_for_agent as mitm_format
+from agent.core import evidence
 from agent.memory.store import save_engagement, load_engagements
 from agent.core.planner import decide_next_tools
 from agent.core.scope import ScopeManager
@@ -60,6 +63,25 @@ TOOL_CALL: nikto_scan <target>
 Example: TOOL_CALL: nikto_scan 192.168.1.1
 Example: TOOL_CALL: nikto_scan 10.0.0.5 -p 443 -ssl
 After nikto runs, analyze all findings and highlight high-severity issues such as outdated software, dangerous HTTP methods, or exposed sensitive paths.
+
+TOOL: zap_scan
+Use this to run an OWASP ZAP active scan against a web target (spider + active scan + alert collection).
+Automatically triggered when port 80 or 443 is found open alongside nikto.
+To call it manually, respond with exactly this format on its own line:
+TOOL_CALL: zap_scan <target>
+Example: TOOL_CALL: zap_scan http://192.168.1.1
+Example: TOOL_CALL: zap_scan http://10.0.0.5:8080
+After ZAP runs, highlight High and Medium severity alerts and recommend fixes.
+
+TOOL: mitm_capture
+Use this when you need to inspect live HTTP traffic to/from a target — useful for finding hidden endpoints, auth tokens, session cookies, or API calls.
+NEVER run automatically — only when the user asks to intercept or inspect traffic.
+To call it, respond with exactly this format on its own line:
+TOOL_CALL: mitm_capture <target> [port]
+Example: TOOL_CALL: mitm_capture http://192.168.1.1 8080
+Example: TOOL_CALL: mitm_capture http://10.0.0.5
+Default capture port is 8080. Inform the user they need to route traffic through the proxy.
+After capture, highlight any auth headers, cookies, API keys, or sensitive parameters found.
 
 TOOL: hydra_scan
 Use this ONLY when the user explicitly asks to brute-force or test credentials.
@@ -234,6 +256,52 @@ def handle_tool_call(tool_line: str) -> tuple:
             console.print(f"[dim]{output}[/dim]")
             return output, {"tool": "nikto_scan", "target": target}
 
+        if tool_name == "zap_scan":
+            if len(parts) < 2:
+                return "ERROR: zap_scan requires a target", {}
+
+            target = parts[1]
+
+            err = _scope_check(target)
+            if err:
+                return err, {}
+
+            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] ZAP active scan → {target}")
+
+            result = zap_scan(target)
+            output = zap_format(result)
+
+            if output is None:
+                output = "ZAP returned no output."
+
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "zap_scan", "target": target}
+
+        if tool_name == "mitm_capture":
+            if len(parts) < 2:
+                return "ERROR: mitm_capture requires a target", {}
+
+            target = parts[1]
+            port = int(parts[2]) if len(parts) > 2 else 8080
+
+            err = _scope_check(target)
+            if err:
+                return err, {}
+
+            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] mitmproxy capture → {target} (:{port})")
+            console.print(
+                f"[dim yellow]Route traffic through http://127.0.0.1:{port} to capture it.[/dim yellow]"
+            )
+
+            result = mitm_capture(target, port=port)
+            output = mitm_format(result)
+
+            if output is None:
+                output = "mitmproxy returned no output."
+
+            console.print(f"[dim]{output}[/dim]")
+            return output, {"tool": "mitm_capture", "target": target}
+
         return f"ERROR: unknown tool {tool_name}", {}
 
     except Exception as e:
@@ -264,6 +332,9 @@ def process_response(reply: str, history: list) -> str:
             output = "Tool returned no output."
         tool_results.append(output)
         tool_metas.append(meta)
+        if meta.get("target") and output:
+            ev_path = evidence.save_command_output(tool_line, output, meta["target"])
+            console.print(f"[dim green]evidence saved → {ev_path}[/dim green]")
 
     # feed results back to agent
     tool_output = "\n\n".join(tool_results)
@@ -301,6 +372,19 @@ def process_response(reply: str, history: list) -> str:
                     nk_output = nikto_format(nk_result)
                     console.print(f"[dim]{nk_output}[/dim]")
                     tool_output += f"\n\n--- AUTO: nikto on {action.target} ---\n{nk_output}"
+
+                elif action.type == "auto_run" and action.tool == "zap_scan":
+                    err = _scope_check(action.target)
+                    if err:
+                        tool_output += f"\n\n--- AUTO: zap on {action.target} BLOCKED ---\n{err}"
+                        continue
+                    console.print(
+                        f"\n[bold cyan]⚡ planner:[/bold cyan] {action.reason} on {action.target}"
+                    )
+                    zp_result = zap_scan(action.target)
+                    zp_output = zap_format(zp_result)
+                    console.print(f"[dim]{zp_output}[/dim]")
+                    tool_output += f"\n\n--- AUTO: zap on {action.target} ---\n{zp_output}"
 
                 elif action.type == "suggest":
                     planner_notes.append(f"- {action.reason.replace('<target>', action.target)}")

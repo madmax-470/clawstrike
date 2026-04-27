@@ -29,8 +29,8 @@ success "System dependencies installed"
 
 # ─── 2. Pentest tools ─────────────────────────────────────────────────────────
 step "Installing pentest tools"
-apt-get install -y -qq nmap gobuster sqlmap nikto hydra
-success "nmap  gobuster  sqlmap  nikto  hydra — installed"
+apt-get install -y -qq nmap gobuster sqlmap nikto hydra zaproxy mitmproxy
+success "nmap  gobuster  sqlmap  nikto  hydra  zaproxy  mitmproxy — installed"
 
 # Metasploit is not in default Debian/Ubuntu repos — use Rapid7's apt repo
 if ! command -v msfconsole &>/dev/null; then

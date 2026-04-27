@@ -57,14 +57,13 @@ def scan(target: str, flags: str = "") -> GobusterResult:
         )
 
     except FileNotFoundError:
+        from agent.core import manual as _manual
+        console.print("[dim yellow]gobuster not found — probing common paths manually[/dim yellow]")
+        found = _manual.probe_common_paths(target)
         return GobusterResult(
             target=target,
-            error=(
-                "gobuster not found — install with:\n"
-                "  sudo apt install gobuster        # Debian/Ubuntu\n"
-                "  brew install gobuster            # macOS\n"
-                "  go install github.com/OJ/gobuster/v3@latest  # Go"
-            ),
+            found_paths=found,
+            raw_output="\n".join(found),
         )
 
     except Exception as e:

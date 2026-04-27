@@ -70,14 +70,16 @@ def scan(target: str, flags: str = "") -> NiktoResult:
         )
 
     except FileNotFoundError:
-        return NiktoResult(
-            target=target,
-            error=(
-                "nikto not found — install with:\n"
-                "  sudo apt install nikto           # Debian/Ubuntu\n"
-                "  brew install nikto               # macOS"
-            ),
-        )
+        from agent.core import manual as _manual
+        console.print("[dim yellow]nikto not found — running manual HTTP fingerprint[/dim yellow]")
+        r = _manual.http_fingerprint(target)
+        summary = _manual.format_http_fingerprint(r)
+        findings = [
+            NiktoFinding(description=line.strip())
+            for line in summary.splitlines()
+            if line.strip() and not line.startswith("Manual HTTP")
+        ]
+        return NiktoResult(target=target, findings=findings, raw_output=summary)
 
     except Exception as e:
         return NiktoResult(target=target, error=str(e))

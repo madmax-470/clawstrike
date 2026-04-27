@@ -65,8 +65,11 @@ def scan(target: str, service: str, flags: str = "") -> HydraResult:
             service=service,
             error=(
                 "hydra not found — install with:\n"
-                "  sudo apt install hydra            # Debian/Ubuntu\n"
-                "  brew install hydra                # macOS"
+                "  sudo apt install hydra\n\n"
+                "Manual alternative (no tools needed):\n"
+                f"  SSH : ssh -o StrictHostKeyChecking=no <user>@{target}\n"
+                f"  FTP : curl ftp://<user>:<pass>@{target}\n"
+                f"  HTTP: curl -u <user>:<pass> http://{target}"
             ),
         )
 

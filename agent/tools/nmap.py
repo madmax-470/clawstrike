@@ -69,10 +69,18 @@ def scan(target: str, flags: str = "") -> ScanResult:
         )
 
     except FileNotFoundError:
+        from agent.core import manual as _manual
+        console.print("[dim yellow]nmap not found — running manual socket scan[/dim yellow]")
+        r = _manual.port_scan(target)
+        host_obj = Host(
+            ip=r["host"],
+            hostname="",
+            status="up",
+            ports=r["open_ports"],
+        )
         return ScanResult(
-            hosts=[],
-            raw_output="",
-            error="nmap not found — install with: brew install nmap"
+            hosts=[host_obj] if r["open_ports"] else [],
+            raw_output=_manual.format_port_scan(r),
         )
 
     except Exception as e:
