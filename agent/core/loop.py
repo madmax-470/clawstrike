@@ -23,12 +23,14 @@ from agent.core.router import ModelRouter
 from agent.core.checker import check_tools, install_tool, install_missing
 from agent.core.exploit_runner import exploit_runner
 from agent.core.post_exploit import post_exploiter
+from agent.core.session import EngagementSession
 
 load_dotenv()
 console = Console()
 
 cfg    = load_config()
 scope  = ScopeManager()
+current_session = None  # set by _handle_pentest, read by exploit commands
 
 SYSTEM_PROMPT = """You are ClawStrike, an elite agentic AI running inside a
 purpose-built pentesting and development Linux environment.
@@ -652,19 +654,25 @@ def _handle_pentest(cmd: str, scope, router) -> None:
         console.print("[dim]Engagement cancelled.[/dim]")
         return
 
+    global current_session
     from agent.core.methodology import Methodology
+    current_session = EngagementSession(
+        target=target,
+        profile=profile.name,
+        scope=scope_display,
+    )
     methodology = Methodology(target=target, profile=profile, router=router)
-    result = methodology.run()
+    result = methodology.run(current_session)
 
     if "error" in result:
         console.print(f"\n[bold red]Engagement stopped: {result['error']}[/bold red]")
+        current_session = None
     else:
-        options = result.get("exploit_options", [])
-        if options:
-            exploit_runner.load(options, target)
-            post_exploiter.set_context(target)
+        post_exploiter.set_context(target)
+        n = len(current_session.exploit_options)
+        if n:
             console.print(
-                f"\n[dim cyan]{len(options)} exploit option(s) loaded — "
+                f"\n[dim cyan]{n} exploit option(s) ready — "
                 f"type 'exploit' to review.[/dim cyan]"
             )
         report = result.get("report")
@@ -827,36 +835,65 @@ def run():
                 available = check_tools(verbose=False)
                 continue
 
-            if cmd.lower() == "exploit":
-                exploit_runner.show_options()
-                continue
+            if cmd.lower().startswith("exploit"):
+                if not current_session:
+                    console.print("[yellow]Run 'pentest <target>' first.[/yellow]")
+                    continue
+                if not current_session.exploit_options:
+                    console.print("[yellow]No exploits found. Run pentest first.[/yellow]")
+                    continue
 
-            if cmd.lower() == "exploit all":
-                exploit_runner.run_all()
-                continue
+                from agent.core.exploiter import execute_exploit
+                parts_cmd = cmd.split()
 
-            if cmd.lower().startswith("exploit "):
-                try:
-                    n = int(cmd.split()[1])
-                    opened = exploit_runner.run_option(n)
-                    if opened and exploit_runner.target:
-                        post_exploiter.set_context(exploit_runner.target)
-                except (IndexError, ValueError):
-                    console.print("[red]Usage: exploit <n>  or  exploit all[/red]")
+                if len(parts_cmd) == 1 or (len(parts_cmd) > 1 and parts_cmd[1] == "all"):
+                    for opt in current_session.exploit_options:
+                        success = execute_exploit(opt, current_session)
+                        if success:
+                            post_exploiter.set_context(current_session.target)
+                            break
+                else:
+                    try:
+                        num = int(parts_cmd[1])
+                        opt = current_session.get_exploit(num)
+                        if opt:
+                            success = execute_exploit(opt, current_session)
+                            if success:
+                                post_exploiter.set_context(current_session.target)
+                        else:
+                            console.print(f"[red]No exploit #{num}[/red]")
+                    except ValueError:
+                        console.print("[red]Usage: exploit <n>  or  exploit all[/red]")
                 continue
 
             if cmd.lower().startswith("skip "):
+                if not current_session:
+                    console.print("[yellow]Run 'pentest <target>' first.[/yellow]")
+                    continue
                 try:
                     n = int(cmd.split()[1])
-                    exploit_runner.skip(n)
+                    opt = current_session.get_exploit(n)
+                    if opt:
+                        opt.confidence = "skipped"
+                        console.print(f"[dim]Option #{n} ({opt.title}) marked skipped.[/dim]")
+                    else:
+                        console.print(f"[red]No exploit #{n}[/red]")
                 except (IndexError, ValueError):
                     console.print("[red]Usage: skip <n>[/red]")
                 continue
 
             if cmd.lower().startswith("manual "):
+                if not current_session:
+                    console.print("[yellow]Run 'pentest <target>' first.[/yellow]")
+                    continue
                 try:
                     n = int(cmd.split()[1])
-                    exploit_runner.show_manual(n)
+                    opt = current_session.get_exploit(n)
+                    if opt:
+                        from agent.core.exploiter import show_manual
+                        show_manual(opt, current_session)
+                    else:
+                        console.print(f"[red]No exploit #{n}[/red]")
                 except (IndexError, ValueError):
                     console.print("[red]Usage: manual <n>[/red]")
                 continue

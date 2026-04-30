@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -5,8 +6,41 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from agent.core.intelligence import intelligence, Answer
+from agent.core.session import EngagementSession, ExploitOption
 
 _ENGAGEMENTS_DIR = Path(__file__).resolve().parents[2] / "engagements"
+
+_PHASE4_SYSTEM_PROMPT = """\
+You are a vulnerability analyst. Given a list of services and versions found \
+on a target, identify exploitable vulnerabilities.
+
+You MUST respond with valid JSON only.
+No markdown. No explanation. Just JSON.
+
+Format:
+{
+  "exploits": [
+    {
+      "title": "vsftpd 2.3.4 Backdoor",
+      "cve": "CVE-2011-2523",
+      "cvss": 10.0,
+      "port": 21,
+      "service": "ftp",
+      "version": "2.3.4",
+      "msf_module": "exploit/unix/ftp/vsftpd_234_backdoor",
+      "manual_cmd": "nc -v {target} 6200",
+      "confidence": "high",
+      "notes": "Backdoor triggered by :) in username"
+    }
+  ]
+}
+
+Sort by cvss descending.
+Include msf_module if a Metasploit module exists.
+Include manual_cmd if exploit can be done manually.
+Only include exploits you are confident about.
+If no exploits known for a service, omit it.\
+"""
 
 console = Console()
 
@@ -256,67 +290,86 @@ class Methodology:
     # ------------------------------------------------------------------ #
     # Phase 4 — CVE / Vulnerability Matching
     # ------------------------------------------------------------------ #
-    def run_phase4(self, services: dict, phase3_results: dict) -> str:
-        """Answers 'what_cves_apply' using the smart AI model."""
+    def run_phase4(self, services: dict, phase3_results: dict,
+                   session: EngagementSession) -> str:
+        """Calls Claude with a JSON-only prompt and parses exploits into session."""
         console.print(Panel("[bold]Phase 4 — CVE & Vulnerability Analysis[/bold]", style="blue"))
 
+        service_lines = "\n".join(
+            f"  Port {port}: {info.get('service', '')} {info.get('version', '')}"
+            for port, info in services.items()
+        )
         phase3_summary = "\n".join(
             f"  [{r.tool}] [{r.method_used}]: "
             f"{'answered' if r.success else 'FAILED'} — "
             f"{(r.output or r.error)[:200]}"
             for r in phase3_results.values()
         )
+        user_prompt = (
+            f"Target: {self.target}\n\nServices:\n{service_lines}\n\n"
+            f"Enumeration findings:\n{phase3_summary}"
+        )
 
-        ans = intelligence.answer("what_cves_apply", self.target, {
-            "services": services,
-            "phase3_summary": phase3_summary,
-            "router": self.router,
-        })
+        try:
+            raw = self.router.chat(
+                "analyze",
+                system=_PHASE4_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=2048,
+            )
+        except Exception as e:
+            console.print(f"[red]❌ Phase 4: AI call failed — {e}[/red]")
+            self.state.cve_analysis = str(e)
+            return str(e)
 
-        analysis = ans.analysis or ans.error
-        self.state.cve_analysis = analysis
+        parse_exploit_options(raw, session)
+        self.state.cve_analysis = raw
+        self.state.exploit_options = [vars(o) for o in session.exploit_options]
 
-        if ans.success:
-            console.print("[green]✅ Phase 4 complete[/green]")
-            console.print(Panel(analysis, title="CVE Analysis", style="dim"))
+        n = len(session.exploit_options)
+        if n:
+            console.print(f"[green]✅ Phase 4 complete — {n} exploit option(s) identified[/green]")
         else:
-            console.print(f"[red]❌ Phase 4: {ans.error}[/red]")
+            console.print("[yellow]⚠ Phase 4 complete — no exploitable vulnerabilities identified[/yellow]")
 
-        return analysis
+        return raw
 
     # ------------------------------------------------------------------ #
     # Phase 5 — Exploitation Planning (human-gated)
     # ------------------------------------------------------------------ #
-    def present_phase5(self, services: dict, cve_analysis: str) -> None:
+    def present_phase5(self, session: EngagementSession) -> None:
         """
-        Answers 'what_exploits_available' and presents the plan for human review.
-        NEVER auto-exploits.
+        Reads exploit options already parsed into session by Phase 4.
+        Presents them for human review. NEVER auto-exploits.
         """
         console.print(Panel("[bold]Phase 5 — Exploitation Planning[/bold]", style="blue"))
 
-        ans = intelligence.answer("what_exploits_available", self.target, {
-            "services": services,
-            "cve_analysis": cve_analysis,
-            "router": self.router,
-        })
+        if not session.exploit_options:
+            console.print("[yellow]⚠ No exploits identified for this target[/yellow]")
+            return
 
-        plan = ans.plan or ans.error
-        exploit_options = ans.data.get("exploit_options", [])
-        self.state.exploitation_plan = plan
-        self.state.exploit_options = exploit_options
+        console.print(f"\n[bold]{len(session.exploit_options)} exploit option(s):[/bold]\n")
 
-        if ans.success:
-            console.print(
-                Panel(plan, title="Exploitation Options (Human Review Required)", style="yellow")
+        risk_icons = {(9, 11): "🔴", (7, 9): "🟠", (0, 7): "🟡"}
+        for opt in session.exploit_options:
+            icon = next(
+                (ic for (lo, hi), ic in risk_icons.items() if lo <= opt.cvss < hi),
+                "🟡",
             )
-            n = len(exploit_options)
-            console.print(
-                f"\n[bold yellow]⚠  Phase 5 complete — {n} option(s) ready.[/bold yellow]\n"
-                "[dim]ClawStrike does not auto-exploit. "
-                "Use 'exploit <n>', 'exploit all', 'skip <n>', or 'manual <n>'.[/dim]"
-            )
-        else:
-            console.print(f"[red]❌ Phase 5: {ans.error}[/red]")
+            msf_tag = "[green]MSF ✓[/green]" if opt.msf_module else "[dim]manual only[/dim]"
+            console.print(f"{icon} [bold][{opt.number}][/bold] {opt.title}")
+            console.print(f"     CVE: {opt.cve}  CVSS: {opt.cvss}  Port: {opt.port}/{opt.service}")
+            console.print(f"     {msf_tag}  Confidence: {opt.confidence}")
+            console.print(f"     [dim]{opt.notes}[/dim]\n")
+
+        self.state.exploitation_plan = (
+            f"{len(session.exploit_options)} option(s) identified — see session for details"
+        )
+
+        console.print(
+            "[bold yellow]⚠  Phase 5 complete — review options above.[/bold yellow]\n"
+            "[dim]Use 'exploit <n>' · 'exploit all' · 'skip <n>' · 'manual <n>'[/dim]"
+        )
 
     # ------------------------------------------------------------------ #
     # Phase 6 — Report
@@ -375,7 +428,7 @@ class Methodology:
     # ------------------------------------------------------------------ #
     # Orchestrator
     # ------------------------------------------------------------------ #
-    def run(self) -> dict:
+    def run(self, session: EngagementSession) -> dict:
         """Run Phases 1-6 in strict order. Return engagement state dict."""
         ok1, ports, _ = self.run_phase1()
         if not ok1:
@@ -389,22 +442,66 @@ class Methodology:
             )
             return {"error": "phase2_failed", "state": self.state}
 
+        # keep session in sync with phase 1-2 discoveries
+        session.open_ports = self.state.open_ports
+        session.services = {
+            str(p): {"service": info.get("service", ""), "version": info.get("version", "")}
+            for p, info in services.items()
+        }
+
         p3_results = self.run_phase3(services)
         self.print_phase3_status(p3_results)
 
-        cve_analysis = self.run_phase4(services, p3_results)
-        self.present_phase5(services, cve_analysis)
+        self.run_phase4(services, p3_results, session)
+        self.present_phase5(session)
 
         report_path = self.write_report()
 
         return {
             "state": self.state,
+            "session": session,
             "report": report_path,
-            "exploit_options": self.state.exploit_options,
         }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def parse_exploit_options(claude_response: str, session: EngagementSession) -> None:
+    """Parse Claude's JSON exploit response and populate session.exploit_options."""
+    clean = claude_response.strip()
+    if clean.startswith("```"):
+        parts = clean.split("```")
+        clean = parts[1] if len(parts) > 1 else clean
+        if clean.startswith("json"):
+            clean = clean[4:]
+        clean = clean.strip()
+
+    try:
+        data = json.loads(clean)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]CVE parsing failed: {e}[/red]")
+        console.print("[dim]Phase 4 incomplete — exploit options unavailable[/dim]")
+        return
+
+    for exploit in data.get("exploits", []):
+        try:
+            option = ExploitOption(
+                number=0,  # set by session.add_exploit
+                title=exploit.get("title", ""),
+                cve=exploit.get("cve", ""),
+                cvss=float(exploit.get("cvss", 0)),
+                port=int(exploit.get("port", 0)),
+                service=exploit.get("service", ""),
+                version=exploit.get("version", ""),
+                msf_module=exploit.get("msf_module", ""),
+                manual_cmd=exploit.get("manual_cmd", ""),
+                confidence=exploit.get("confidence", "low"),
+                notes=exploit.get("notes", ""),
+            )
+            session.add_exploit(option)
+        except (KeyError, ValueError, TypeError) as e:
+            console.print(f"[dim red]skipping malformed exploit entry: {e}[/dim red]")
+
 
 def _answer_to_result(question: str, ans: Answer) -> ToolResult:
     """Convert an Answer into a ToolResult for phase status tracking."""
