@@ -3,16 +3,18 @@ from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from agent.core.intelligence import intelligence, Answer
 
 console = Console()
 
 
 @dataclass
 class ToolResult:
-    tool: str
+    tool: str          # question name (e.g. "what_web_paths_exist")
     success: bool
     output: str = ""
     error: str = ""
+    method_used: str = ""   # which method answered it (e.g. "gobuster", "manual_urllib")
 
 
 @dataclass
@@ -33,22 +35,25 @@ class Methodology:
     """
     Runs a phased penetration test engagement.
 
-    Phase 1 — Discovery         (nmap host/port sweep)
-    Phase 2 — Service ID        (nmap -sV on open ports)
-    Phase 3 — Targeted enum     (per-service tools)
-    Phase 4 — CVE / vuln match  (AI analysis)
-    Phase 5 — Exploitation plan (AI ranked options, human approved)
+    Phase 1 — Discovery         (answer: is_host_alive + what_ports_open)
+    Phase 2 — Service ID        (answer: what_services_on_ports)
+    Phase 3 — Targeted enum     (answer: service-specific questions)
+    Phase 4 — CVE / vuln match  (answer: what_cves_apply)
+    Phase 5 — Exploitation plan (answer: what_exploits_available)
     Phase 6 — Report            (summary written to disk)
+
+    The agent thinks in questions, not tools.
+    The question is always the goal; the tool used to answer it is an
+    implementation detail shown in [brackets] but never the primary focus.
 
     Enforcement rules:
     - Never skip a phase.
-    - Never say "complete" if any tool in a phase failed.
-    - Always show per-tool ✅/❌ status after each phase.
+    - Never say "complete" if any question could not be answered.
+    - Always show per-question ✅/❌ status after each phase.
     - Never auto-exploit — Phase 5 presents options and stops.
     """
 
     def __init__(self, target: str, profile, router):
-        from agent.core.scan_profiles import ScanProfile
         self.target = target
         self.profile = profile
         self.router = router
@@ -63,133 +68,143 @@ class Methodology:
     def run_phase1(self) -> tuple[bool, list, str]:
         """Returns (success, open_port_list, raw_output)."""
         console.print(Panel(
-            f"[bold]Phase 1 — Discovery[/bold]\nTarget: {self.target}  Profile: {self.profile.name}",
+            f"[bold]Phase 1 — Discovery[/bold]\n"
+            f"Target: {self.target}  Profile: {self.profile.name}",
             style="blue",
         ))
 
-        cmd = self.profile.phase1_cmd.format(target=self.target)
-        flags = " ".join(cmd.split()[1:])  # strip "nmap" prefix
+        # answering: is_host_alive
+        alive_answer = intelligence.answer("is_host_alive", self.target, {})
+        if not alive_answer.alive:
+            console.print(
+                "[yellow]⚠ Host may be down or blocking all probes — continuing anyway[/yellow]"
+            )
 
-        from agent.tools import nmap
-        result = nmap.scan(self.target, flags=flags)
+        # answering: what_ports_open
+        context = {
+            "phase1_cmd": self.profile.phase1_cmd.format(target=self.target),
+            "top_ports": 100,
+        }
+        port_answer = intelligence.answer("what_ports_open", self.target, context)
 
-        if result.error:
-            console.print(f"[red]❌ nmap phase-1: {result.error}[/red]")
-            return False, [], result.raw_output
+        if not port_answer.success:
+            console.print(f"[red]❌ port discovery: {port_answer.error}[/red]")
+            return False, [], ""
 
-        ports = []
-        for host in result.hosts:
-            for p in host.ports:
-                ports.append(p["port"])
-
-        self.state.live_hosts = result.hosts
+        ports = port_answer.ports
+        self.state.live_hosts = port_answer.data.get("hosts", [])
         self.state.open_ports = ports
         self.state.phase1_passed = True
 
-        console.print(f"[green]✅ nmap phase-1 — {len(result.hosts)} host(s), {len(ports)} open port(s)[/green]")
-        return True, ports, result.raw_output
+        console.print(
+            f"[green]✅ Phase 1 — {len(ports)} open port(s) discovered "
+            f"[{port_answer.method_used}][/green]"
+        )
+        return True, ports, ""
 
     # ------------------------------------------------------------------ #
     # Phase 2 — Service Identification
     # ------------------------------------------------------------------ #
     def run_phase2(self, ports: list) -> tuple[bool, dict, str]:
-        """Returns (success, services_dict, raw_output).
-        services_dict maps port -> {service, version} info.
-        """
+        """Returns (success, services_dict, raw_output)."""
         console.print(Panel("[bold]Phase 2 — Service Identification[/bold]", style="blue"))
 
         if not ports:
             console.print("[yellow]⚠ No open ports from Phase 1 — skipping Phase 2[/yellow]")
             return False, {}, ""
 
-        port_str = ",".join(str(p) for p in ports)
-        cmd = self.profile.phase2_cmd.format(ports=port_str, target=self.target)
-        flags_parts = cmd.split()[1:]
-        # Remove -p <ports> and target — we pass target separately
-        clean_flags = []
-        skip_next = False
-        for tok in flags_parts:
-            if skip_next:
-                skip_next = False
-                continue
-            if tok == "-p":
-                skip_next = True
-                continue
-            if tok == self.target:
-                continue
-            clean_flags.append(tok)
-        flags = " ".join(clean_flags)
+        # answering: what_services_on_ports (all ports in one scan for efficiency)
+        context = {
+            "ports": ports,
+            "profile_cmd": self.profile.phase2_cmd,
+        }
+        answer = intelligence.answer("what_services_on_ports", self.target, context)
 
-        from agent.tools import nmap
-        result = nmap.scan(self.target, flags=f"-p {port_str} {flags}")
+        if not answer.success:
+            console.print(f"[red]❌ service identification: {answer.error}[/red]")
+            return False, {}, ""
 
-        if result.error:
-            console.print(f"[red]❌ nmap phase-2: {result.error}[/red]")
-            return False, {}, result.raw_output
-
-        services: dict = {}
-        for host in result.hosts:
-            for p in host.ports:
-                services[p["port"]] = {
-                    "service": p["service"],
-                    "version": p["version"],
-                    "protocol": p["protocol"],
-                }
-
+        services = answer.services
         self.state.services = services
         self.state.phase2_passed = True
 
         _print_services_table(services)
-        console.print(f"[green]✅ nmap phase-2 — {len(services)} service(s) identified[/green]")
-        return True, services, result.raw_output
+        console.print(
+            f"[green]✅ Phase 2 — {len(services)} service(s) identified "
+            f"[{answer.method_used}][/green]"
+        )
+        return True, services, ""
 
     # ------------------------------------------------------------------ #
     # Phase 3 — Targeted Enumeration
     # ------------------------------------------------------------------ #
     def run_phase3(self, services: dict) -> dict:
         """
-        Dispatches per-service tools based on what was found.
-        Returns dict of {tool_name: ToolResult}.
+        Asks service-specific intelligence questions based on what Phase 2 found.
+        Returns dict of {question_name: ToolResult}.
         """
         console.print(Panel("[bold]Phase 3 — Targeted Enumeration[/bold]", style="blue"))
 
         results: dict[str, ToolResult] = {}
-        timeout = self.profile.phase3_timeout
-
         port_services = {str(port): info["service"] for port, info in services.items()}
 
-        has_http  = any(s in ("http", "https", "http-alt") for s in port_services.values())
-        has_ftp   = any(s == "ftp"  for s in port_services.values())
-        has_ssh   = any(s == "ssh"  for s in port_services.values())
-        has_smb   = any(s in ("microsoft-ds", "netbios-ssn", "smb") for s in port_services.values())
-        has_db    = any(s in ("mysql", "postgresql", "mssql", "oracle") for s in port_services.values())
+        has_http = any(s in ("http", "https", "http-alt") for s in port_services.values())
+        has_ftp  = any(s == "ftp"  for s in port_services.values())
+        has_ssh  = any(s == "ssh"  for s in port_services.values())
+        has_smb  = any(s in ("microsoft-ds", "netbios-ssn", "smb") for s in port_services.values())
+        has_db   = any(s in ("mysql", "postgresql", "mssql", "oracle") for s in port_services.values())
 
         if has_http:
             http_ports = [p for p, s in port_services.items()
                           if s in ("http", "https", "http-alt")]
+            http_port = int(http_ports[0]) if http_ports else 80
             http_target = _build_http_target(self.target, http_ports)
-            results.update(_run_web_tools(http_target, timeout))
+            ctx = {"port": http_port}
+
+            for question in ("what_web_paths_exist", "what_web_tech", "is_web_vulnerable"):
+                ans = intelligence.answer(question, http_target, ctx)
+                results[question] = _answer_to_result(question, ans)
 
         if has_ftp:
-            results.update(_run_ftp_tools(self.target))
+            ftp_port = next(
+                (int(p) for p, s in port_services.items() if s == "ftp"), 21
+            )
+            ans = intelligence.answer(
+                "is_ftp_anonymous", self.target, {"port": ftp_port}
+            )
+            results["is_ftp_anonymous"] = _answer_to_result("is_ftp_anonymous", ans)
 
         if has_ssh:
-            results.update(_run_ssh_tools(self.target))
+            ssh_port = next(
+                (int(p) for p, s in port_services.items() if s == "ssh"), 22
+            )
+            ans = intelligence.answer(
+                "what_ssh_ciphers", self.target, {"port": ssh_port}
+            )
+            results["what_ssh_ciphers"] = _answer_to_result("what_ssh_ciphers", ans)
 
         if has_smb:
-            results.update(_run_smb_tools(self.target))
+            ans = intelligence.answer("is_smb_vulnerable", self.target, {})
+            results["is_smb_vulnerable"] = _answer_to_result("is_smb_vulnerable", ans)
 
         if has_db:
-            results["db_note"] = ToolResult(
-                tool="db_note",
-                success=True,
-                output=f"Database service detected on {self.target} — CVE matching in Phase 4.",
+            db_service = next(
+                (s for s in port_services.values()
+                 if s in ("mysql", "postgresql", "mssql", "oracle")),
+                "mysql",
             )
+            db_port = next(
+                (int(p) for p, s in port_services.items() if s == db_service), 3306
+            )
+            ans = intelligence.answer(
+                "is_db_default_creds", self.target,
+                {"service": db_service, "port": db_port}
+            )
+            results["is_db_default_creds"] = _answer_to_result("is_db_default_creds", ans)
 
         if not results:
             results["note"] = ToolResult(
-                tool="note",
-                success=True,
+                tool="note", success=True, method_used="n/a",
                 output="No web/ftp/ssh/smb/db services detected — skipping targeted enumeration.",
             )
 
@@ -197,29 +212,40 @@ class Methodology:
         return results
 
     def print_phase3_status(self, results: dict) -> bool:
-        """Print per-tool ✅/❌ table. Returns True only if ALL tools succeeded."""
-        table = Table(title="Phase 3 — Tool Results", show_header=True)
-        table.add_column("Tool", style="bold")
+        """Print per-question ✅/❌ table. Returns True only if ALL questions were answered."""
+        table = Table(title="Phase 3 — Questions Answered", show_header=True)
+        table.add_column("Question", style="bold")
         table.add_column("Status")
+        table.add_column("Method", style="dim")
         table.add_column("Detail")
 
         all_ok = True
         for name, r in results.items():
             if r.success:
-                table.add_row(name, "[green]✅ OK[/green]", r.output[:80] if r.output else "")
+                table.add_row(
+                    name,
+                    "[green]✅ answered[/green]",
+                    r.method_used,
+                    r.output[:80] if r.output else "",
+                )
             else:
-                table.add_row(name, "[red]❌ FAIL[/red]", r.error[:80] if r.error else "")
+                table.add_row(
+                    name,
+                    "[red]❌ failed[/red]",
+                    r.method_used,
+                    r.error[:80] if r.error else "",
+                )
                 all_ok = False
 
         console.print(table)
 
         if not all_ok:
             console.print(
-                "[yellow]⚠  Phase 3 partial — some tools failed. "
-                "Results below are incomplete.[/yellow]"
+                "[yellow]⚠  Phase 3 partial — some questions could not be answered. "
+                "Results may be incomplete.[/yellow]"
             )
         else:
-            console.print("[green]✅ Phase 3 complete — all tools succeeded[/green]")
+            console.print("[green]✅ Phase 3 complete — all questions answered[/green]")
 
         return all_ok
 
@@ -227,100 +253,63 @@ class Methodology:
     # Phase 4 — CVE / Vulnerability Matching
     # ------------------------------------------------------------------ #
     def run_phase4(self, services: dict, phase3_results: dict) -> str:
-        """Uses the smart model to match services/versions to known CVEs."""
+        """Answers 'what_cves_apply' using the smart AI model."""
         console.print(Panel("[bold]Phase 4 — CVE & Vulnerability Analysis[/bold]", style="blue"))
 
-        service_lines = "\n".join(
-            f"  Port {port}: {info['service']} {info['version']}"
-            for port, info in services.items()
-        )
-
-        enum_summary = "\n".join(
-            f"  [{r.tool}]: {'OK' if r.success else 'FAILED'} — {(r.output or r.error)[:200]}"
+        phase3_summary = "\n".join(
+            f"  [{r.tool}] [{r.method_used}]: "
+            f"{'answered' if r.success else 'FAILED'} — "
+            f"{(r.output or r.error)[:200]}"
             for r in phase3_results.values()
         )
 
-        prompt = f"""You are a penetration tester. Analyze these services and enumeration results
-for known CVEs and vulnerabilities. Be specific — include CVE IDs where known.
+        ans = intelligence.answer("what_cves_apply", self.target, {
+            "services": services,
+            "phase3_summary": phase3_summary,
+            "router": self.router,
+        })
 
-Target: {self.target}
+        analysis = ans.analysis or ans.error
+        self.state.cve_analysis = analysis
 
-Services found:
-{service_lines}
-
-Enumeration results:
-{enum_summary}
-
-List the most likely exploitable vulnerabilities in order of severity (Critical → High → Medium).
-For each: CVE ID (if known), affected service/version, severity, brief description, and
-whether a Metasploit module likely exists."""
-
-        try:
-            analysis = self.router.chat(
-                "analyze",
-                system="You are an expert penetration tester performing authorized security assessments.",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
-            )
-            self.state.cve_analysis = analysis
-            console.print("[green]✅ Phase 4 complete — AI CVE analysis done[/green]")
+        if ans.success:
+            console.print("[green]✅ Phase 4 complete[/green]")
             console.print(Panel(analysis, title="CVE Analysis", style="dim"))
-            return analysis
-        except Exception as e:
-            err = f"AI analysis failed: {e}"
-            console.print(f"[red]❌ Phase 4: {err}[/red]")
-            self.state.cve_analysis = err
-            return err
+        else:
+            console.print(f"[red]❌ Phase 4: {ans.error}[/red]")
+
+        return analysis
 
     # ------------------------------------------------------------------ #
     # Phase 5 — Exploitation Planning (human-gated)
     # ------------------------------------------------------------------ #
     def present_phase5(self, services: dict, cve_analysis: str) -> None:
         """
-        Presents ranked exploitation options via AI.
-        NEVER auto-exploits — prints options and stops for human decision.
+        Answers 'what_exploits_available' and presents the plan for human review.
+        NEVER auto-exploits.
         """
         console.print(Panel("[bold]Phase 5 — Exploitation Planning[/bold]", style="blue"))
 
-        service_lines = "\n".join(
-            f"  Port {port}: {info['service']} {info['version']}"
-            for port, info in services.items()
-        )
+        ans = intelligence.answer("what_exploits_available", self.target, {
+            "services": services,
+            "cve_analysis": cve_analysis,
+            "router": self.router,
+        })
 
-        prompt = f"""You are a senior penetration tester. Based on the vulnerability analysis,
-create a ranked exploitation plan.
+        plan = ans.plan or ans.error
+        self.state.exploitation_plan = plan
 
-Target: {self.target}
-Services:
-{service_lines}
-
-Vulnerability analysis:
-{cve_analysis}
-
-Provide a numbered list of exploitation options, ranked by likelihood of success:
-1. Metasploit module path (if applicable)
-2. Manual technique
-3. Tool command
-4. Expected outcome
-5. Risk level (to target stability)
-
-End with a recommendation for which to attempt first."""
-
-        try:
-            plan = self.router.chat(
-                "exploit",
-                system="You are an expert penetration tester performing authorized security assessments.",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
+        if ans.success:
+            console.print(
+                Panel(plan, title="Exploitation Options (Human Review Required)", style="yellow")
             )
-            self.state.exploitation_plan = plan
-            console.print(Panel(plan, title="Exploitation Options (Human Review Required)", style="yellow"))
             console.print(
                 "\n[bold yellow]⚠  Phase 5 complete — review options above.[/bold yellow]\n"
-                "[dim]ClawStrike does not auto-exploit. Use 'exploit' command to proceed manually.[/dim]"
+                "[dim]ClawStrike does not auto-exploit. "
+                "Use 'exploit' command to proceed manually.[/dim]"
             )
-        except Exception as e:
-            console.print(f"[red]❌ Phase 5: AI planning failed: {e}[/red]")
+        else:
+            console.print(f"[red]❌ Phase 5: {ans.error}[/red]")
 
     # ------------------------------------------------------------------ #
     # Phase 6 — Report
@@ -330,42 +319,42 @@ End with a recommendation for which to attempt first."""
         from pathlib import Path
         import datetime
 
-        safe_target = self.target.replace("://", "_").replace("/", "_").replace(":", "_")
+        safe_target = (
+            self.target.replace("://", "_").replace("/", "_").replace(":", "_")
+        )
         report_dir = Path("engagements") / safe_target
         report_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = report_dir / f"report_{ts}.md"
 
         lines = [
-            f"# ClawStrike Engagement Report",
-            f"",
+            "# ClawStrike Engagement Report",
+            "",
             f"**Target:** {self.target}",
             f"**Profile:** {self.profile.name}",
             f"**Date:** {datetime.datetime.now().isoformat()}",
-            f"",
-            f"## Phase 1 — Discovery",
+            "",
+            "## Phase 1 — Discovery",
             f"Open ports: {', '.join(str(p) for p in self.state.open_ports) or 'none'}",
-            f"",
-            f"## Phase 2 — Services",
+            "",
+            "## Phase 2 — Services",
         ]
         for port, info in self.state.services.items():
             lines.append(f"- Port {port}: {info['service']} {info['version']}")
 
-        lines += [
-            f"",
-            f"## Phase 3 — Enumeration",
-        ]
+        lines += ["", "## Phase 3 — Enumeration"]
         for name, r in self.state.phase3_results.items():
             status = "✅" if r.success else "❌"
-            lines.append(f"### {status} {name}")
+            method = f"  [{r.method_used}]" if r.method_used else ""
+            lines.append(f"### {status} {name}{method}")
             lines.append(r.output or r.error or "")
 
         lines += [
-            f"",
-            f"## Phase 4 — CVE Analysis",
+            "",
+            "## Phase 4 — CVE Analysis",
             self.state.cve_analysis,
-            f"",
-            f"## Phase 5 — Exploitation Plan",
+            "",
+            "## Phase 5 — Exploitation Plan",
             self.state.exploitation_plan,
         ]
 
@@ -381,41 +370,62 @@ End with a recommendation for which to attempt first."""
     # Orchestrator
     # ------------------------------------------------------------------ #
     def run(self) -> dict:
-        """Run Phases 1-5 in strict order. Return engagement state dict."""
-        # Phase 1
+        """Run Phases 1-6 in strict order. Return engagement state dict."""
         ok1, ports, _ = self.run_phase1()
         if not ok1:
             console.print("[red]Phase 1 failed — cannot continue engagement.[/red]")
             return {"error": "phase1_failed", "state": self.state}
 
-        # Phase 2
         ok2, services, _ = self.run_phase2(ports)
         if not ok2 or not services:
-            console.print("[red]Phase 2 failed or no services identified — cannot continue.[/red]")
+            console.print(
+                "[red]Phase 2 failed or no services identified — cannot continue.[/red]"
+            )
             return {"error": "phase2_failed", "state": self.state}
 
-        # Phase 3
         p3_results = self.run_phase3(services)
         self.print_phase3_status(p3_results)
 
-        # Phase 4
         cve_analysis = self.run_phase4(services, p3_results)
-
-        # Phase 5 (never auto-exploits)
         self.present_phase5(services, cve_analysis)
 
-        # Phase 6
         report_path = self.write_report()
 
-        return {
-            "state": self.state,
-            "report": report_path,
-        }
+        return {"state": self.state, "report": report_path}
 
 
-# ------------------------------------------------------------------ #
-# Helpers
-# ------------------------------------------------------------------ #
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _answer_to_result(question: str, ans: Answer) -> ToolResult:
+    """Convert an Answer into a ToolResult for phase status tracking."""
+    output = ""
+    if ans.success:
+        d = ans.data
+        if "paths" in d:
+            output = f"{len(d['paths'])} path(s) found"
+        elif "tech" in d:
+            output = ", ".join(d["tech"][:5]) or "none detected"
+        elif "vulnerabilities" in d:
+            output = f"{len(d['vulnerabilities'])} finding(s)"
+        elif "weak_ciphers" in d:
+            output = f"{len(d['weak_ciphers'])} weak cipher(s)"
+        elif "anonymous" in d:
+            output = f"anonymous login {'ALLOWED' if d['anonymous'] else 'denied'}"
+        elif "vulnerable" in d:
+            output = f"default creds {'FOUND' if d['vulnerable'] else 'not found'}"
+        elif "raw" in d:
+            output = d["raw"][:200]
+        else:
+            output = str(d)[:200]
+
+    return ToolResult(
+        tool=question,
+        success=ans.success,
+        output=output,
+        error=ans.error,
+        method_used=ans.method_used,
+    )
+
 
 def _build_http_target(target: str, http_ports: list) -> str:
     if target.startswith("http://") or target.startswith("https://"):
@@ -425,114 +435,8 @@ def _build_http_target(target: str, http_ports: list) -> str:
     return f"{scheme}://{target}:{port}"
 
 
-def _run_web_tools(target: str, timeout: int) -> dict:
-    results = {}
-
-    from agent.tools import gobuster, nikto
-
-    gb = gobuster.scan(target)
-    results["gobuster"] = ToolResult(
-        tool="gobuster",
-        success=gb.error is None,
-        output=gobuster.format_for_agent(gb),
-        error=gb.error or "",
-    )
-
-    nk = nikto.scan(target)
-    results["nikto"] = ToolResult(
-        tool="nikto",
-        success=nk.error is None,
-        output=nikto.format_for_agent(nk),
-        error=nk.error or "",
-    )
-
-    return results
-
-
-def _run_ftp_tools(target: str) -> dict:
-    from agent.core.subprocess_utils import run_tool, tool_exists
-    results = {}
-
-    # Anonymous login check
-    stdout, stderr, rc = run_tool(
-        ["ftp", "-n", "-v", target],
-        timeout=10,
-    )
-    anon_ok = "230" in stdout or "anonymous" in stdout.lower()
-    results["ftp_anon"] = ToolResult(
-        tool="ftp_anon",
-        success=True,
-        output=f"Anonymous FTP {'ALLOWED' if anon_ok else 'denied'} on {target}",
-    )
-
-    # vsftpd 2.3.4 backdoor check (port 6200)
-    import socket
-    backdoor = False
-    try:
-        s = socket.socket()
-        s.settimeout(3)
-        s.connect((target, 6200))
-        backdoor = True
-        s.close()
-    except OSError:
-        pass
-
-    results["ftp_backdoor"] = ToolResult(
-        tool="ftp_backdoor",
-        success=True,
-        output=(
-            f"vsftpd 2.3.4 backdoor port 6200: {'OPEN — potential backdoor!' if backdoor else 'closed'}"
-        ),
-    )
-
-    return results
-
-
-def _run_ssh_tools(target: str) -> dict:
-    from agent.core.subprocess_utils import run_tool, tool_exists
-    results = {}
-
-    if tool_exists("ssh-audit"):
-        stdout, stderr, rc = run_tool(["ssh-audit", target], timeout=30)
-        results["ssh_audit"] = ToolResult(
-            tool="ssh_audit",
-            success=rc == 0,
-            output=stdout[:2000] if rc == 0 else "",
-            error=stderr[:500] if rc != 0 else "",
-        )
-    else:
-        results["ssh_audit"] = ToolResult(
-            tool="ssh_audit",
-            success=False,
-            error="ssh-audit not installed — run: pip install ssh-audit",
-        )
-
-    return results
-
-
-def _run_smb_tools(target: str) -> dict:
-    from agent.core.subprocess_utils import run_tool, tool_exists
-    results = {}
-
-    if tool_exists("enum4linux"):
-        stdout, stderr, rc = run_tool(["enum4linux", "-a", target], timeout=60)
-        results["enum4linux"] = ToolResult(
-            tool="enum4linux",
-            success=rc == 0,
-            output=stdout[:3000] if rc == 0 else "",
-            error=stderr[:500] if rc != 0 else "",
-        )
-    else:
-        results["enum4linux"] = ToolResult(
-            tool="enum4linux",
-            success=False,
-            error="enum4linux not installed — run: apt install enum4linux",
-        )
-
-    return results
-
-
 def _print_services_table(services: dict) -> None:
+    from rich.table import Table
     table = Table(title="Services Identified", show_header=True)
     table.add_column("Port", style="cyan")
     table.add_column("Protocol")
