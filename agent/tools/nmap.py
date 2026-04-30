@@ -1,9 +1,10 @@
-import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -23,7 +24,7 @@ class ScanResult:
     error: Optional[str] = None
 
 
-def scan(target: str, flags: str = "") -> ScanResult:
+def scan(target: str, flags: str = "", timeout: int = 120) -> ScanResult:
     if not tool_exists("nmap"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["nmap"]
@@ -36,29 +37,58 @@ def scan(target: str, flags: str = "") -> ScanResult:
             raw_output=_manual.format_port_scan(r),
         )
 
-    clean_flags = [f for f in flags.split() if f not in ["-oX", "-"]]
-    command = ["nmap", "-oX", "-"] + clean_flags + [target]
+    xml_tmp = Path(tempfile.mktemp(suffix=".xml", prefix="clawstrike_nmap_"))
 
-    console.print(f"[dim]running: {' '.join(command)}[/dim]")
+    # Strip any output-format flags the caller may have passed
+    clean_flags = []
+    skip_next = False
+    for tok in flags.split():
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in ("-oX", "-oN", "-oG", "-oS", "-oA"):
+            skip_next = True
+            continue
+        if tok == "-":
+            continue
+        clean_flags.append(tok)
 
-    stdout, stderr, returncode = run_tool(command, timeout=120)
+    # -oN - streams human-readable output to stdout (displayed live)
+    # -oX <file> writes structured XML to a temp file for parsing
+    command = ["nmap", "-oN", "-", "-oX", str(xml_tmp)] + clean_flags + [target]
 
-    if returncode != 0:
+    result = runner.run(command, label=f"nmap → {target}", timeout=timeout)
+
+    hosts = []
+    if xml_tmp.exists():
+        try:
+            hosts = parse_xml(xml_tmp.read_text())
+        except Exception:
+            pass
+        finally:
+            try:
+                xml_tmp.unlink()
+            except OSError:
+                pass
+
+    if result.tool_not_found:
+        return ScanResult(hosts=[], raw_output="", error="nmap not found")
+
+    if result.timed_out:
         return ScanResult(
-            hosts=[],
-            raw_output=stderr,
-            error=stderr or f"nmap exited with code {returncode}",
+            hosts=hosts,
+            raw_output=result.clean_output,
+            error=f"nmap timed out after {timeout}s",
         )
 
-    if not stdout.strip():
+    if result.returncode != 0 and not hosts:
         return ScanResult(
             hosts=[],
-            raw_output="",
-            error=f"nmap produced no output. stderr: {stderr}",
+            raw_output=result.clean_output,
+            error=result.clean_output or f"nmap exited with code {result.returncode}",
         )
 
-    hosts = parse_xml(stdout)
-    return ScanResult(hosts=hosts, raw_output=stdout)
+    return ScanResult(hosts=hosts, raw_output=result.clean_output)
 
 
 def parse_xml(xml_output: str) -> list:

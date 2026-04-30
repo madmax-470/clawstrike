@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -39,18 +39,22 @@ def scan(target: str, service: str, flags: str = "") -> HydraResult:
         command += flags.split()
     command += [f"{service}://{target}"]
 
-    console.print(f"[dim]running: {' '.join(command)}[/dim]")
+    result = runner.run(
+        command,
+        label=f"hydra → {service}://{target}",
+        timeout=300,
+    )
 
-    stdout, stderr, _ = run_tool(command, timeout=300)
+    if result.tool_not_found:
+        return HydraResult(target=target, service=service, error="hydra not found")
 
-    combined = stdout + stderr
-    creds = parse_output(combined, target, service)
+    creds = parse_output(result.clean_output, target, service)
 
     return HydraResult(
         target=target,
         service=service,
         credentials=creds,
-        raw_output=combined,
+        raw_output=result.clean_output,
     )
 
 

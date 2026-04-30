@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -39,18 +39,18 @@ def scan(target: str, flags: str = "") -> SqlmapResult:
     if flags:
         command += flags.split()
 
-    console.print(f"[dim]running: {' '.join(command)}[/dim]")
+    result = runner.run(command, label=f"sqlmap → {target}", timeout=300)
 
-    stdout, stderr, _ = run_tool(command, timeout=180)
+    if result.tool_not_found:
+        return SqlmapResult(target=target, error="sqlmap not found")
 
-    combined = stdout + stderr
-    vulns, dbs = parse_output(combined)
+    vulns, dbs = parse_output(result.clean_output)
 
     return SqlmapResult(
         target=target,
         vulnerable_params=vulns,
         databases=dbs,
-        raw_output=combined,
+        raw_output=result.clean_output,
     )
 
 

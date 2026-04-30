@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists, get_env
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -99,8 +99,8 @@ def _ensure_zap_running() -> Optional[str]:
             f"-config api.key={ZAP_API_KEY}"
         )
 
-    # launch ZAP daemon via run_tool so it inherits full PATH/env
-    stdout, stderr, rc = run_tool(
+    # Launch ZAP daemon — short timeout expected since ZAP daemonises itself
+    runner.run(
         [
             zap_bin, "-daemon",
             "-port", str(ZAP_PORT),
@@ -108,9 +108,10 @@ def _ensure_zap_running() -> Optional[str]:
             "-config", "api.addrs.addr.name=.*",
             "-config", "api.addrs.addr.regex=true",
         ],
-        timeout=5,   # we don't wait for it to finish — just launch
+        label=f"ZAP daemon → port {ZAP_PORT}",
+        timeout=5,
+        filter_noise=False,
     )
-    # ZAP daemonises itself so run_tool will time out or return quickly; that's fine
     console.print(f"[dim]ZAP daemon starting ({zap_bin}) on port {ZAP_PORT}…[/dim]")
 
     for _ in range(30):

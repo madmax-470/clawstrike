@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -54,25 +54,31 @@ def scan(target: str, flags: str = "") -> GobusterResult:
             ),
         )
 
-    console.print(f"[dim]wordlist: {wordlist}[/dim]")
-
     command = ["gobuster", "dir", "-u", target, "-w", wordlist, "-q"]
     if flags:
         command += flags.split()
 
-    console.print(f"[dim]running: {' '.join(command)}[/dim]")
+    result = runner.run(command, label=f"gobuster → {target}", timeout=120)
 
-    stdout, stderr, returncode = run_tool(command, timeout=120)
+    if result.tool_not_found:
+        return GobusterResult(target=target, error="gobuster not found")
 
-    if returncode != 0 and not stdout.strip():
+    if result.timed_out:
         return GobusterResult(
             target=target,
-            raw_output=stderr,
-            error=stderr or f"gobuster exited with code {returncode}",
+            raw_output=result.clean_output,
+            error="gobuster timed out",
         )
 
-    found = parse_output(stdout)
-    return GobusterResult(target=target, found_paths=found, raw_output=stdout)
+    if result.returncode != 0 and not result.clean_output.strip():
+        return GobusterResult(
+            target=target,
+            raw_output=result.clean_output,
+            error=result.clean_output or f"gobuster exited with code {result.returncode}",
+        )
+
+    found = parse_output(result.clean_output)
+    return GobusterResult(target=target, found_paths=found, raw_output=result.clean_output)
 
 
 def parse_output(raw: str) -> list:

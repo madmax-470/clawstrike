@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists, get_env
+from agent.core.subprocess_utils import runner, tool_exists, get_env
 
 console = Console()
 
@@ -163,9 +163,14 @@ def _searchsploit_fallback(query: str) -> list[ExploitMatch]:
     """Run searchsploit when pymetasploit3 is unavailable."""
     if not tool_exists("searchsploit"):
         return []
-    stdout, _, _ = run_tool(["searchsploit", "--colour", query], timeout=30)
+    result = runner.run(
+        ["searchsploit", "--colour", query],
+        label=f"searchsploit → {query}",
+        timeout=30,
+        filter_noise=False,
+    )
     matches = []
-    for line in stdout.splitlines():
+    for line in result.clean_output.splitlines():
         line = line.strip()
         if not line or line.startswith("-") or line.startswith("Exploit Title"):
             continue
@@ -192,14 +197,14 @@ def _msfconsole_search_fallback(query: str) -> list[ExploitMatch]:
     if not tool_exists("msfconsole"):
         return []
 
-    console.print("[dim yellow]trying msfconsole search (may take 20-30s)…[/dim yellow]")
-    stdout, stderr, rc = run_tool(
+    result = runner.run(
         ["msfconsole", "-q", "-x", f"search {query}; exit -y"],
+        label=f"msfconsole search → {query}",
         timeout=60,
     )
 
     matches = []
-    for line in stdout.splitlines():
+    for line in result.clean_output.splitlines():
         m = _MSF_MODULE_RE.match(line)
         if not m:
             continue

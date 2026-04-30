@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from rich.console import Console
-from agent.core.subprocess_utils import run_tool, tool_exists
+from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
@@ -50,25 +50,31 @@ def scan(target: str, flags: str = "") -> NiktoResult:
             host = host[len(prefix):]
             break
 
-    # -maxtime caps nikto's own internal timer; -nointeractive prevents prompts
     command = ["nikto", "-h", host, "-maxtime", "120", "-nointeractive"]
     if flags:
         command += flags.split()
 
-    console.print(f"[dim]running: {' '.join(command)}[/dim]")
+    result = runner.run(command, label=f"nikto → {host}", timeout=150)
 
-    # subprocess timeout is 150s — 30s grace over nikto's own -maxtime 120
-    stdout, stderr, returncode = run_tool(command, timeout=150)
+    if result.tool_not_found:
+        return NiktoResult(target=target, error="nikto not found")
 
-    if returncode != 0 and not stdout.strip():
+    if result.timed_out:
         return NiktoResult(
             target=target,
-            raw_output=stderr,
-            error=stderr or f"nikto exited with code {returncode}",
+            raw_output=result.clean_output,
+            error=f"nikto timed out after 150s",
         )
 
-    findings = parse_output(stdout)
-    return NiktoResult(target=target, findings=findings, raw_output=stdout)
+    if result.returncode != 0 and not result.clean_output.strip():
+        return NiktoResult(
+            target=target,
+            raw_output=result.clean_output,
+            error=result.clean_output or f"nikto exited with code {result.returncode}",
+        )
+
+    findings = parse_output(result.clean_output)
+    return NiktoResult(target=target, findings=findings, raw_output=result.clean_output)
 
 
 def parse_output(raw: str) -> list:

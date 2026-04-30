@@ -186,8 +186,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             if err:
                 return err, {}
 
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] nmap {flags} {target}")
-
             result = nmap_scan(target, flags)
             output = nmap_format(result)
 
@@ -208,8 +206,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             if err:
                 return err, {}
 
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] gobuster dir -u {target}")
-
             result = gobuster_scan(target, flags)
             output = gobuster_format(result)
 
@@ -229,8 +225,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             err = _scope_check(target)
             if err:
                 return err, {}
-
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] sqlmap -u {target} --batch")
 
             result = sqlmap_scan(target, flags)
             output = sqlmap_format(result)
@@ -291,8 +285,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             if err:
                 return err, {}
 
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] nikto -h {target} {flags}".strip())
-
             result = nikto_scan(target, flags)
             output = nikto_format(result)
 
@@ -311,8 +303,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             err = _scope_check(target)
             if err:
                 return err, {}
-
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] ZAP active scan → {target}")
 
             result = zap_scan(target)
             output = zap_format(result)
@@ -355,8 +345,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             query   = parts[1]
             version = " ".join(parts[2:]) if len(parts) > 2 else None
 
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] msf search — {query} {version or ''}")
-
             is_cve = query.upper().startswith("CVE-") or query.upper().startswith("CVE")
             matches, msf_err = msf.search_exploit(
                 cve=query if is_cve else None,
@@ -396,7 +384,6 @@ def handle_tool_call(tool_line: str, available: dict) -> tuple:
             return output, {"tool": "msf_exploit", "target": target}
 
         if tool_name == "msf_sessions":
-            console.print(f"\n[bold yellow]⚡ executing:[/bold yellow] msf sessions list")
             sessions, msf_err = msf.get_sessions()
             output = msf.format_for_agent(sessions) if not msf_err else f"MSF SESSIONS ERROR: {msf_err}"
             console.print(f"[dim]{output}[/dim]")
