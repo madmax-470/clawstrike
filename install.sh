@@ -151,7 +151,17 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}.service"
 success "Service '${SERVICE_NAME}' created and enabled"
 
-# ─── 7. Success banner ────────────────────────────────────────────────────────
+# ─── 7. System-wide launcher ──────────────────────────────────────────────────
+step "Installing system-wide launcher"
+cat > /usr/local/bin/clawstrike <<EOF
+#!/usr/bin/env bash
+cd $INSTALL_DIR
+PYTHONPATH=$INSTALL_DIR exec $VENV_DIR/bin/python3 -m agent.core.loop "\$@"
+EOF
+chmod +x /usr/local/bin/clawstrike
+success "Launcher installed — run 'clawstrike' or 'sudo clawstrike' from anywhere"
+
+# ─── 8. Success banner ────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${RESET}"
 echo -e "${GREEN}${BOLD}║        ClawStrike OS — Installation Complete!    ║${RESET}"
