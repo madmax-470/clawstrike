@@ -23,16 +23,21 @@ def check_tools(verbose: bool = True) -> dict[str, bool]:
     if verbose:
         _print_table(available)
 
-    missing_critical = [
-        name for name, ok in available.items()
-        if not ok and REGISTRY[name].critical
-    ]
-    for name in missing_critical:
+    for name, ok in available.items():
+        if ok:
+            continue
         tool = REGISTRY[name]
-        console.print(
-            f"\n[bold red]⚠  CRITICAL:[/bold red] [bold]{name}[/bold] not found — "
-            f"run: [yellow]{tool.apt}[/yellow]"
-        )
+        if tool.critical:
+            console.print(
+                f"[bold red]⚠  CRITICAL:[/bold red] [bold]{name}[/bold] not installed — "
+                f"run: [yellow]{tool.apt}[/yellow]"
+            )
+        else:
+            fallback_note = "  [dim](manual fallback active)[/dim]" if tool.fallback else ""
+            console.print(
+                f"[yellow]  ✗  {name}[/yellow] not installed — "
+                f"run: [dim]{tool.apt}[/dim]{fallback_note}"
+            )
 
     return available
 
