@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from agent.core.intelligence import intelligence, Answer
+
+_ENGAGEMENTS_DIR = Path(__file__).resolve().parents[2] / "engagements"
 
 console = Console()
 
@@ -29,6 +32,7 @@ class EngagementState:
     phase3_results: dict = field(default_factory=dict)
     cve_analysis: str = ""
     exploitation_plan: str = ""
+    exploit_options: list = field(default_factory=list)
 
 
 class Methodology:
@@ -297,16 +301,19 @@ class Methodology:
         })
 
         plan = ans.plan or ans.error
+        exploit_options = ans.data.get("exploit_options", [])
         self.state.exploitation_plan = plan
+        self.state.exploit_options = exploit_options
 
         if ans.success:
             console.print(
                 Panel(plan, title="Exploitation Options (Human Review Required)", style="yellow")
             )
+            n = len(exploit_options)
             console.print(
-                "\n[bold yellow]⚠  Phase 5 complete — review options above.[/bold yellow]\n"
+                f"\n[bold yellow]⚠  Phase 5 complete — {n} option(s) ready.[/bold yellow]\n"
                 "[dim]ClawStrike does not auto-exploit. "
-                "Use 'exploit' command to proceed manually.[/dim]"
+                "Use 'exploit <n>', 'exploit all', 'skip <n>', or 'manual <n>'.[/dim]"
             )
         else:
             console.print(f"[red]❌ Phase 5: {ans.error}[/red]")
@@ -316,13 +323,12 @@ class Methodology:
     # ------------------------------------------------------------------ #
     def write_report(self) -> Optional[str]:
         """Write engagement summary to disk. Returns path or None on error."""
-        from pathlib import Path
         import datetime
 
         safe_target = (
             self.target.replace("://", "_").replace("/", "_").replace(":", "_")
         )
-        report_dir = Path("engagements") / safe_target
+        report_dir = _ENGAGEMENTS_DIR / safe_target
         report_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = report_dir / f"report_{ts}.md"
@@ -391,7 +397,11 @@ class Methodology:
 
         report_path = self.write_report()
 
-        return {"state": self.state, "report": report_path}
+        return {
+            "state": self.state,
+            "report": report_path,
+            "exploit_options": self.state.exploit_options,
+        }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

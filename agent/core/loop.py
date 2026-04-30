@@ -21,6 +21,8 @@ from agent.reports.generator import generate_report
 from agent.core.config import load_config, ModelConfig, save_workflow_config
 from agent.core.router import ModelRouter
 from agent.core.checker import check_tools, install_tool, install_missing
+from agent.core.exploit_runner import exploit_runner
+from agent.core.post_exploit import post_exploiter
 
 load_dotenv()
 console = Console()
@@ -657,6 +659,14 @@ def _handle_pentest(cmd: str, scope, router) -> None:
     if "error" in result:
         console.print(f"\n[bold red]Engagement stopped: {result['error']}[/bold red]")
     else:
+        options = result.get("exploit_options", [])
+        if options:
+            exploit_runner.load(options, target)
+            post_exploiter.set_context(target)
+            console.print(
+                f"\n[dim cyan]{len(options)} exploit option(s) loaded — "
+                f"type 'exploit' to review.[/dim cyan]"
+            )
         report = result.get("report")
         if report:
             console.print(f"\n[bold green]Engagement complete — report: {report}[/bold green]")
@@ -719,6 +729,10 @@ def run():
         f"{mode_line}"
         f"  [dim]build: {BUILD_DATE}[/dim]\n\n"
         "[dim]commands: [/dim][bold]pentest <target> [--profile stealth|standard|thorough|full][/bold]\n"
+        "[dim]           [/dim][bold]exploit[/bold][dim] · [/dim][bold]exploit <n>[/bold][dim] · [/dim]"
+        "[bold]exploit all[/bold][dim] · [/dim][bold]skip <n>[/bold][dim] · [/dim][bold]manual <n>[/bold]\n"
+        "[dim]           [/dim][bold]loot [session][/bold][dim] · [/dim][bold]pivot [session][/bold][dim] · [/dim]"
+        "[bold]persist[/bold][dim] · [/dim][bold]persist <n> [session][/bold]\n"
         "[dim]           [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
         "[bold]scope clear[/bold][dim] · [/dim][bold]summary [target][/bold][dim] · [/dim]"
         "[bold]report <target>[/bold][dim] · [/dim][bold]tools[/bold][dim] · [/dim]"
@@ -811,6 +825,72 @@ def run():
                 tool_name_arg = cmd[14:].strip()
                 install_tool(tool_name_arg)
                 available = check_tools(verbose=False)
+                continue
+
+            if cmd.lower() == "exploit":
+                exploit_runner.show_options()
+                continue
+
+            if cmd.lower() == "exploit all":
+                exploit_runner.run_all()
+                continue
+
+            if cmd.lower().startswith("exploit "):
+                try:
+                    n = int(cmd.split()[1])
+                    opened = exploit_runner.run_option(n)
+                    if opened and exploit_runner.target:
+                        post_exploiter.set_context(exploit_runner.target)
+                except (IndexError, ValueError):
+                    console.print("[red]Usage: exploit <n>  or  exploit all[/red]")
+                continue
+
+            if cmd.lower().startswith("skip "):
+                try:
+                    n = int(cmd.split()[1])
+                    exploit_runner.skip(n)
+                except (IndexError, ValueError):
+                    console.print("[red]Usage: skip <n>[/red]")
+                continue
+
+            if cmd.lower().startswith("manual "):
+                try:
+                    n = int(cmd.split()[1])
+                    exploit_runner.show_manual(n)
+                except (IndexError, ValueError):
+                    console.print("[red]Usage: manual <n>[/red]")
+                continue
+
+            if cmd.lower() == "loot" or cmd.lower().startswith("loot "):
+                parts = cmd.split()
+                try:
+                    sid = int(parts[1]) if len(parts) > 1 else None
+                except ValueError:
+                    sid = None
+                post_exploiter.loot(sid)
+                continue
+
+            if cmd.lower() == "pivot" or cmd.lower().startswith("pivot "):
+                parts = cmd.split()
+                try:
+                    sid = int(parts[1]) if len(parts) > 1 else None
+                except ValueError:
+                    sid = None
+                post_exploiter.pivot(sid)
+                continue
+
+            if cmd.lower() == "persist":
+                post_exploiter.show_persist_options()
+                continue
+
+            if cmd.lower().startswith("persist "):
+                parts = cmd.split()
+                try:
+                    n = int(parts[1])
+                    sid = int(parts[2]) if len(parts) > 2 else None
+                    post_exploiter.apply_persist(n, sid)
+                except (IndexError, ValueError):
+                    console.print("[red]Usage: persist <n> [session_id][/red]")
                 continue
 
             if cmd.lower().startswith("pentest "):

@@ -946,25 +946,35 @@ class PentestIntelligence:
         prompt = (
             f"Target: {target}\nServices:\n{service_lines}\n\n"
             f"CVE Analysis:\n{cve_analysis}\n\n"
-            "Produce a ranked exploitation plan. For each option provide: "
-            "Metasploit module path (if applicable), manual technique, "
-            "tool command, expected outcome, risk level to target stability."
+            "Produce a ranked exploitation plan. Write the full human-readable plan first.\n\n"
+            "Then append this JSON block at the very end (required for automated exploit commands):\n\n"
+            "[EXPLOIT_OPTIONS_JSON]\n"
+            "[\n"
+            '  {"n": 1, "title": "Short title", "module": "exploit/path/or/empty_string", '
+            '"payload": "payload/path/or/empty_string", "notes": "one line summary", "risk": "HIGH"},\n'
+            "  ...\n"
+            "]\n"
+            "[/EXPLOIT_OPTIONS_JSON]\n\n"
+            "JSON rules: module = exact Metasploit module path, or empty string if none. "
+            "payload = recommended payload path, or empty string. "
+            "risk = HIGH, MEDIUM, or LOW."
         )
 
         self._trying("AI exploit planner (smart model)")
         try:
             if router:
-                plan = router.chat(
+                raw = router.chat(
                     "exploit",
                     system="You are an expert penetration tester performing authorized security assessments.",
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=2048,
                 )
             else:
-                plan = "No AI router available for exploitation planning."
-            self._ok("AI exploit planner", "complete")
+                raw = "No AI router available for exploitation planning."
+            plan, exploit_options = _parse_exploit_plan(raw)
+            self._ok("AI exploit planner", f"{len(exploit_options)} option(s) parsed")
             return Answer("what_exploits_available", target, True, "ai_planner",
-                          {"plan": plan})
+                          {"plan": plan, "exploit_options": exploit_options})
         except Exception as e:
             self._fail("AI exploit planner", str(e))
             return Answer("what_exploits_available", target, False, "ai_planner", error=str(e))
@@ -1200,6 +1210,27 @@ def _find_wordlist() -> Optional[str]:
         if Path(candidate).exists():
             return candidate
     return None
+
+
+def _parse_exploit_plan(text: str) -> tuple:
+    """Split AI plan text into (human_readable, structured_options_list).
+
+    Looks for [EXPLOIT_OPTIONS_JSON]...[/EXPLOIT_OPTIONS_JSON] block.
+    Returns the text before it and the parsed list (empty list on failure).
+    """
+    import re, json
+    m = re.search(r"\[EXPLOIT_OPTIONS_JSON\](.*?)\[/EXPLOIT_OPTIONS_JSON\]",
+                  text, re.DOTALL)
+    if not m:
+        return text.strip(), []
+    clean = text[: m.start()].strip()
+    try:
+        options = json.loads(m.group(1).strip())
+        if not isinstance(options, list):
+            return clean, []
+        return clean, options
+    except (json.JSONDecodeError, ValueError):
+        return clean, []
 
 
 _COMMON_PATHS = [
