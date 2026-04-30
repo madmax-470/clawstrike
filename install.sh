@@ -136,7 +136,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV_DIR/bin/python3 agent/core/loop.py
+Environment=PYTHONPATH=$INSTALL_DIR
+ExecStart=$VENV_DIR/bin/python3 -m agent.core.loop
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
