@@ -1,3 +1,4 @@
+import re
 import shutil
 import socket
 import subprocess
@@ -6,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists, get_env
 
 console = Console()
 
@@ -117,6 +119,7 @@ def start_msfrpcd() -> Optional[str]:
             [binary, "-P", MSF_PASSWORD, "-p", str(MSF_PORT), "-S"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=get_env(),
         )
         console.print(f"[dim]msfrpcd starting on port {MSF_PORT}…[/dim]")
 
@@ -158,34 +161,59 @@ def _build_query(cve: Optional[str], service: Optional[str], version: Optional[s
 
 def _searchsploit_fallback(query: str) -> list[ExploitMatch]:
     """Run searchsploit when pymetasploit3 is unavailable."""
-    binary = shutil.which("searchsploit")
-    if not binary:
+    if not tool_exists("searchsploit"):
         return []
-    try:
-        result = subprocess.run(
-            [binary, "--colour", query],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-        lines = result.stdout.decode("utf-8", errors="replace").splitlines()
-        matches = []
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("-") or line.startswith("Exploit Title"):
-                continue
-            # searchsploit output: "Title   | Path"
-            if "|" in line:
-                title, path = line.split("|", 1)
-                matches.append(ExploitMatch(
-                    fullname=path.strip(),
-                    name=title.strip(),
-                    rank="unknown",
-                    description=f"searchsploit result — path: {path.strip()}",
-                ))
-        return matches
-    except Exception:
+    stdout, _, _ = run_tool(["searchsploit", "--colour", query], timeout=30)
+    matches = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("-") or line.startswith("Exploit Title"):
+            continue
+        if "|" in line:
+            title, path = line.split("|", 1)
+            matches.append(ExploitMatch(
+                fullname=path.strip(),
+                name=title.strip(),
+                rank="unknown",
+                description=f"searchsploit result — path: {path.strip()}",
+            ))
+    return matches
+
+
+# msfconsole output line pattern: "   N  exploit/path/name   date  rank  check  desc"
+_MSF_MODULE_RE = re.compile(r"^\s+\d+\s+(exploit/\S+|auxiliary/\S+|post/\S+)\s+.*?(\w+)\s+\w+\s+(.*)")
+
+
+def _msfconsole_search_fallback(query: str) -> list[ExploitMatch]:
+    """
+    Run msfconsole -q -x 'search <query>; exit -y' as last-resort fallback.
+    msfconsole takes 20-30s to start so we allow 60s timeout.
+    """
+    if not tool_exists("msfconsole"):
         return []
+
+    console.print("[dim yellow]trying msfconsole search (may take 20-30s)…[/dim yellow]")
+    stdout, stderr, rc = run_tool(
+        ["msfconsole", "-q", "-x", f"search {query}; exit -y"],
+        timeout=60,
+    )
+
+    matches = []
+    for line in stdout.splitlines():
+        m = _MSF_MODULE_RE.match(line)
+        if not m:
+            continue
+        fullname = m.group(1)
+        rank     = m.group(2)
+        desc     = m.group(3).strip()
+        matches.append(ExploitMatch(
+            fullname=fullname,
+            name=fullname.split("/")[-1],
+            rank=rank,
+            description=desc,
+        ))
+
+    return matches
 
 
 def search_exploit(
@@ -208,7 +236,11 @@ def search_exploit(
         matches = _searchsploit_fallback(query)
         if matches:
             return matches, None
-        return [], f"msfrpcd failed and searchsploit not found.\nmsfrpcd error: {err}"
+        console.print("[dim yellow]searchsploit not found — trying msfconsole[/dim yellow]")
+        matches = _msfconsole_search_fallback(query)
+        if matches:
+            return matches, None
+        return [], f"All search methods failed.\nmsfrpcd error: {err}"
 
     try:
         client = _get_client()
@@ -232,6 +264,10 @@ def search_exploit(
     except ImportError as e:
         console.print(f"[dim yellow]{e} — trying searchsploit[/dim yellow]")
         matches = _searchsploit_fallback(query)
+        if matches:
+            return matches, None
+        console.print("[dim yellow]searchsploit not found — trying msfconsole[/dim yellow]")
+        matches = _msfconsole_search_fallback(query)
         return matches, None if matches else str(e)
 
     except Exception as e:

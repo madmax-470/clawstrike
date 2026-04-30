@@ -1,12 +1,24 @@
-import shutil
-import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists
 
 console = Console()
 
-DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+_WORDLISTS = [
+    "/usr/share/wordlists/dirb/common.txt",
+    "/usr/share/dirb/wordlists/common.txt",
+    "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+    "/usr/share/seclists/Discovery/Web-Content/common.txt",
+]
+
+
+def _find_wordlist() -> Optional[str]:
+    for wl in _WORDLISTS:
+        if Path(wl).exists():
+            return wl
+    return None
 
 
 @dataclass
@@ -18,7 +30,7 @@ class GobusterResult:
 
 
 def scan(target: str, flags: str = "") -> GobusterResult:
-    if not shutil.which("gobuster"):
+    if not tool_exists("gobuster"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["gobuster"]
         console.print(f"[dim yellow]gobuster not found — probing common paths manually. Install: {_t.apt}[/dim yellow]")
@@ -28,61 +40,42 @@ def scan(target: str, flags: str = "") -> GobusterResult:
         found = _manual.probe_common_paths(target)
         return GobusterResult(target=target, found_paths=found, raw_output="\n".join(found))
 
-    # ensure target has a scheme
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"http://{target}"
 
-    wordlist = DEFAULT_WORDLIST
-    command = ["gobuster", "dir", "-u", target, "-w", wordlist, "-q"]
+    wordlist = _find_wordlist()
+    if not wordlist:
+        return GobusterResult(
+            target=target,
+            error=(
+                "No wordlist found. Install one with:\n"
+                "  apt install wordlists seclists dirb\n"
+                "Searched:\n" + "\n".join(f"  {w}" for w in _WORDLISTS)
+            ),
+        )
 
+    console.print(f"[dim]wordlist: {wordlist}[/dim]")
+
+    command = ["gobuster", "dir", "-u", target, "-w", wordlist, "-q"]
     if flags:
         command += flags.split()
 
     console.print(f"[dim]running: {' '.join(command)}[/dim]")
 
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
-        )
+    stdout, stderr, returncode = run_tool(command, timeout=120)
 
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
-
-        if result.returncode != 0 and not stdout.strip():
-            return GobusterResult(
-                target=target,
-                raw_output=stderr,
-                error=stderr or f"gobuster exited with code {result.returncode}",
-            )
-
-        found = parse_output(stdout)
-        return GobusterResult(target=target, found_paths=found, raw_output=stdout)
-
-    except subprocess.TimeoutExpired:
+    if returncode != 0 and not stdout.strip():
         return GobusterResult(
             target=target,
-            error="gobuster timed out after 120 seconds",
+            raw_output=stderr,
+            error=stderr or f"gobuster exited with code {returncode}",
         )
 
-    except FileNotFoundError:
-        from agent.core import manual as _manual
-        console.print("[dim yellow]gobuster not found — probing common paths manually[/dim yellow]")
-        found = _manual.probe_common_paths(target)
-        return GobusterResult(
-            target=target,
-            found_paths=found,
-            raw_output="\n".join(found),
-        )
-
-    except Exception as e:
-        return GobusterResult(target=target, error=str(e))
+    found = parse_output(stdout)
+    return GobusterResult(target=target, found_paths=found, raw_output=stdout)
 
 
 def parse_output(raw: str) -> list:
-    """Extract found paths from gobuster output lines like: /admin (Status: 200) [Size: 1234]"""
     paths = []
     for line in raw.splitlines():
         line = line.strip()

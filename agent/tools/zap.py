@@ -1,34 +1,27 @@
-import shutil
 import socket
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists, get_env
 
 console = Console()
 
-ZAP_PORT = 8090
+ZAP_PORT    = 8090
 ZAP_API_KEY = "clawstrike"
-ZAP_PROXY = f"http://localhost:{ZAP_PORT}"
+ZAP_PROXY   = f"http://localhost:{ZAP_PORT}"
 
-# Ordered list of well-known ZAP binary locations (config.yaml takes priority)
+# Check these paths in order — config.yaml override handled separately
 _ZAP_KNOWN_PATHS = [
+    "/usr/share/zaproxy/zap.sh",       # Debian/Ubuntu apt
+    "/usr/bin/zaproxy",                 # some distros put it here
+    "/opt/zaproxy/zap.sh",             # manual Linux install
     "/Applications/ZAP.app/Contents/Java/zap.sh",  # macOS homebrew cask
-    "/usr/share/zaproxy/zap.sh",                    # Debian/Ubuntu apt
-    "/opt/zaproxy/zap.sh",                          # manual Linux install
 ]
 
 
 def _resolve_zap_bin() -> Optional[str]:
-    """
-    Return the first usable ZAP binary path, trying in order:
-      1. tools.zap_path in config.yaml
-      2. Known fixed paths (macOS cask, Debian apt, manual Linux)
-      3. zap.sh / zaproxy on PATH via shutil.which
-    Returns None if nothing is found.
-    """
     # 1. config.yaml override
     try:
         import yaml
@@ -45,8 +38,10 @@ def _resolve_zap_bin() -> Optional[str]:
         if Path(candidate).is_file():
             return candidate
 
-    # 3. PATH
-    return shutil.which("zap.sh") or shutil.which("zaproxy")
+    # 3. PATH (zaproxy first, then zap.sh)
+    env_path = get_env()["PATH"]
+    import shutil
+    return shutil.which("zaproxy", path=env_path) or shutil.which("zap.sh", path=env_path)
 
 
 @dataclass
@@ -78,6 +73,14 @@ def _is_zap_up() -> bool:
         sock.close()
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Parse ZAP status values safely — ZAP sometimes returns non-numeric strings."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _ensure_zap_running() -> Optional[str]:
     if _is_zap_up():
         return None
@@ -90,30 +93,33 @@ def _ensure_zap_running() -> Optional[str]:
         tried = "\n".join(f"  {p}" for p in _ZAP_KNOWN_PATHS)
         return (
             f"zaproxy not installed. Run: {_t.apt}\n\n"
-            "Searched paths:\n"
-            f"{tried}\n"
-            "  zap.sh / zaproxy on PATH\n\n"
-            "Or start ZAP manually and set tools.zap_path in config.yaml."
+            f"Searched:\n{tried}\n"
+            "  zaproxy / zap.sh on PATH\n\n"
+            f"Or start ZAP manually: <zap.sh> -daemon -port {ZAP_PORT} "
+            f"-config api.key={ZAP_API_KEY}"
         )
 
-    try:
-        subprocess.Popen(
-            [zap_bin, "-daemon", "-port", str(ZAP_PORT),
-             "-config", f"api.key={ZAP_API_KEY}",
-             "-config", "api.addrs.addr.name=.*",
-             "-config", "api.addrs.addr.regex=true"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        console.print(f"[dim]ZAP daemon starting ({zap_bin}) on port {ZAP_PORT}…[/dim]")
-        for _ in range(30):
-            time.sleep(1)
-            if _is_zap_up():
-                console.print("[dim green]ZAP daemon ready[/dim green]")
-                return None
-        return f"ZAP started via {zap_bin} but did not respond within 30 seconds"
-    except FileNotFoundError:
-        return f"ZAP binary not executable: {zap_bin}"
+    # launch ZAP daemon via run_tool so it inherits full PATH/env
+    stdout, stderr, rc = run_tool(
+        [
+            zap_bin, "-daemon",
+            "-port", str(ZAP_PORT),
+            "-config", f"api.key={ZAP_API_KEY}",
+            "-config", "api.addrs.addr.name=.*",
+            "-config", "api.addrs.addr.regex=true",
+        ],
+        timeout=5,   # we don't wait for it to finish — just launch
+    )
+    # ZAP daemonises itself so run_tool will time out or return quickly; that's fine
+    console.print(f"[dim]ZAP daemon starting ({zap_bin}) on port {ZAP_PORT}…[/dim]")
+
+    for _ in range(30):
+        time.sleep(1)
+        if _is_zap_up():
+            console.print("[dim green]ZAP daemon ready[/dim green]")
+            return None
+
+    return f"ZAP started via {zap_bin} but did not respond within 30 seconds"
 
 
 def _get_client():
@@ -130,34 +136,6 @@ def _get_client():
         )
 
 
-def spider(target: str) -> ZAPResult:
-    err = _ensure_zap_running()
-    if err:
-        return ZAPResult(target=target, error=err)
-
-    try:
-        zap = _get_client()
-        console.print(f"[dim]ZAP spider: {target}[/dim]")
-        scan_id = zap.spider.scan(target, apikey=ZAP_API_KEY)
-        while int(zap.spider.status(scan_id)) < 100:
-            time.sleep(2)
-        urls = zap.spider.results(scan_id)
-        console.print(f"[dim]ZAP spider complete — {len(urls)} URL(s) found[/dim]")
-        return ZAPResult(target=target, urls_found=list(urls))
-    except ImportError as e:
-        return ZAPResult(target=target, error=str(e))
-    except Exception as e:
-        return ZAPResult(target=target, error=f"ZAP spider failed: {e}")
-
-
-def get_alerts(target: str) -> list:
-    try:
-        zap = _get_client()
-        return zap.core.alerts(baseurl=target, apikey=ZAP_API_KEY) or []
-    except Exception:
-        return []
-
-
 def start_scan(target: str) -> ZAPResult:
     err = _ensure_zap_running()
     if err:
@@ -169,7 +147,7 @@ def start_scan(target: str) -> ZAPResult:
         # Spider phase
         console.print(f"[dim]ZAP spider: {target}[/dim]")
         spider_id = zap.spider.scan(target, apikey=ZAP_API_KEY)
-        while int(zap.spider.status(spider_id)) < 100:
+        while _safe_int(zap.spider.status(spider_id)) < 100:
             time.sleep(2)
         urls = list(zap.spider.results(spider_id))
         console.print(f"[dim]ZAP spider complete — {len(urls)} URL(s)[/dim]")
@@ -177,7 +155,7 @@ def start_scan(target: str) -> ZAPResult:
         # Active scan phase
         console.print(f"[dim]ZAP active scan: {target}[/dim]")
         scan_id = zap.ascan.scan(target, apikey=ZAP_API_KEY)
-        while int(zap.ascan.status(scan_id)) < 100:
+        while _safe_int(zap.ascan.status(scan_id)) < 100:
             time.sleep(5)
         console.print("[dim]ZAP active scan complete[/dim]")
 

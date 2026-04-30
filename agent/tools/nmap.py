@@ -1,9 +1,9 @@
 import shutil
-import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists
 
 console = Console()
 
@@ -24,7 +24,7 @@ class ScanResult:
 
 
 def scan(target: str, flags: str = "") -> ScanResult:
-    if not shutil.which("nmap"):
+    if not tool_exists("nmap"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["nmap"]
         console.print(f"[dim yellow]nmap not found — using manual port scan. Install: {_t.apt}[/dim yellow]")
@@ -36,72 +36,29 @@ def scan(target: str, flags: str = "") -> ScanResult:
             raw_output=_manual.format_port_scan(r),
         )
 
-    # clean any conflicting flags
     clean_flags = [f for f in flags.split() if f not in ["-oX", "-"]]
     command = ["nmap", "-oX", "-"] + clean_flags + [target]
 
     console.print(f"[dim]running: {' '.join(command)}[/dim]")
 
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120
-        )
+    stdout, stderr, returncode = run_tool(command, timeout=120)
 
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
-
-        if result.returncode != 0:
-            return ScanResult(
-                hosts=[],
-                raw_output=stderr,
-                error=stderr or f"nmap exited with code {result.returncode}"
-            )
-
-        if not stdout.strip():
-            return ScanResult(
-                hosts=[],
-                raw_output="",
-                error=f"nmap produced no output. stderr: {stderr}"
-            )
-
-        hosts = parse_xml(stdout)
-
+    if returncode != 0:
         return ScanResult(
-            hosts=hosts,
-            raw_output=stdout,
+            hosts=[],
+            raw_output=stderr,
+            error=stderr or f"nmap exited with code {returncode}",
         )
 
-    except subprocess.TimeoutExpired:
+    if not stdout.strip():
         return ScanResult(
             hosts=[],
             raw_output="",
-            error="scan timed out after 120 seconds"
+            error=f"nmap produced no output. stderr: {stderr}",
         )
 
-    except FileNotFoundError:
-        from agent.core import manual as _manual
-        console.print("[dim yellow]nmap not found — running manual socket scan[/dim yellow]")
-        r = _manual.port_scan(target)
-        host_obj = Host(
-            ip=r["host"],
-            hostname="",
-            status="up",
-            ports=r["open_ports"],
-        )
-        return ScanResult(
-            hosts=[host_obj] if r["open_ports"] else [],
-            raw_output=_manual.format_port_scan(r),
-        )
-
-    except Exception as e:
-        return ScanResult(
-            hosts=[],
-            raw_output="",
-            error=str(e)
-        )
+    hosts = parse_xml(stdout)
+    return ScanResult(hosts=hosts, raw_output=stdout)
 
 
 def parse_xml(xml_output: str) -> list:
@@ -147,15 +104,10 @@ def parse_xml(xml_output: str) -> list:
                             "port": port.get("portid"),
                             "protocol": port.get("protocol"),
                             "service": service,
-                            "version": version
+                            "version": version,
                         })
 
-            hosts.append(Host(
-                ip=ip,
-                hostname=hostname,
-                status=status,
-                ports=ports
-            ))
+            hosts.append(Host(ip=ip, hostname=hostname, status=status, ports=ports))
 
     except ET.ParseError as e:
         console.print(f"[red]XML parse error: {e}[/red]")
@@ -177,7 +129,7 @@ def format_for_agent(result: ScanResult) -> str:
         if host.ports:
             lines.append(f"  Open ports ({len(host.ports)}):")
             for p in host.ports:
-                ver = f" — {p['version']}" if p['version'] else ""
+                ver = f" — {p['version']}" if p["version"] else ""
                 lines.append(f"    {p['port']}/{p['protocol']}  {p['service']}{ver}")
         else:
             lines.append("  No open ports detected")

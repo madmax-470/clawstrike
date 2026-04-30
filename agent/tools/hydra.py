@@ -1,9 +1,8 @@
-import shutil
-import subprocess
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists
 
 console = Console()
 
@@ -26,7 +25,7 @@ class HydraResult:
 
 
 def scan(target: str, service: str, flags: str = "") -> HydraResult:
-    if not shutil.which("hydra"):
+    if not tool_exists("hydra"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["hydra"]
         return HydraResult(
@@ -42,49 +41,17 @@ def scan(target: str, service: str, flags: str = "") -> HydraResult:
 
     console.print(f"[dim]running: {' '.join(command)}[/dim]")
 
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=300,
-        )
+    stdout, stderr, _ = run_tool(command, timeout=300)
 
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
-        combined = stdout + stderr
+    combined = stdout + stderr
+    creds = parse_output(combined, target, service)
 
-        creds = parse_output(combined, target, service)
-        return HydraResult(
-            target=target,
-            service=service,
-            credentials=creds,
-            raw_output=combined,
-        )
-
-    except subprocess.TimeoutExpired:
-        return HydraResult(
-            target=target,
-            service=service,
-            error="hydra timed out after 300 seconds",
-        )
-
-    except FileNotFoundError:
-        return HydraResult(
-            target=target,
-            service=service,
-            error=(
-                "hydra not found — install with:\n"
-                "  sudo apt install hydra\n\n"
-                "Manual alternative (no tools needed):\n"
-                f"  SSH : ssh -o StrictHostKeyChecking=no <user>@{target}\n"
-                f"  FTP : curl ftp://<user>:<pass>@{target}\n"
-                f"  HTTP: curl -u <user>:<pass> http://{target}"
-            ),
-        )
-
-    except Exception as e:
-        return HydraResult(target=target, service=service, error=str(e))
+    return HydraResult(
+        target=target,
+        service=service,
+        credentials=creds,
+        raw_output=combined,
+    )
 
 
 _CRED_PATTERN = re.compile(

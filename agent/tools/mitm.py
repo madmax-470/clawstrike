@@ -1,19 +1,18 @@
 import os
-import shutil
 import signal
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists, get_env
 
 console = Console()
 
 CAPTURE_DURATION = 60
 _FLOWS_BASE = Path("engagements")
 
-_proxy_process: Optional[subprocess.Popen] = None
+_proxy_process = None
 
 
 @dataclass
@@ -50,38 +49,9 @@ def _extract_host(target: str) -> str:
     return host.split("/")[0].split(":")[0]
 
 
-def start_proxy(port: int = 8080) -> Optional[str]:
-    """Start mitmdump daemon in the background. Returns error string or None."""
-    global _proxy_process
-    if _proxy_process and _proxy_process.poll() is None:
-        console.print(f"[dim]mitmproxy already running[/dim]")
-        return None
-
-    try:
-        _proxy_process = subprocess.Popen(
-            ["mitmdump", "--listen-port", str(port), "--quiet"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)
-        if _proxy_process.poll() is not None:
-            return f"mitmdump exited immediately — port {port} may already be in use"
-        console.print(f"[dim green]mitmproxy listening on :{port}[/dim green]")
-        return None
-
-    except FileNotFoundError:
-        return (
-            "mitmdump not found — install with:\n"
-            "  sudo apt install mitmproxy     # Debian/Ubuntu\n"
-            "  pip install mitmproxy          # pip (also installs Python library)"
-        )
-    except Exception as e:
-        return f"Failed to start proxy: {e}"
-
-
 def capture_traffic(target: str, port: int = 8080, duration: int = CAPTURE_DURATION) -> MitmResult:
     """Run mitmdump for `duration` seconds, capturing traffic from `target`."""
-    if not shutil.which("mitmdump"):
+    if not tool_exists("mitmdump"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["mitmproxy"]
         return MitmResult(
@@ -92,14 +62,20 @@ def capture_traffic(target: str, port: int = 8080, duration: int = CAPTURE_DURAT
     host = _extract_host(target)
     flows_file = _flows_path(target)
 
+    console.print(
+        f"[dim]mitmdump: capturing {host} for {duration}s "
+        f"on :{port} → {flows_file}[/dim]"
+    )
+
+    import subprocess
+    env = get_env()
+    import shutil
+    binary = shutil.which("mitmdump", path=env["PATH"]) or "mitmdump"
+
     try:
-        console.print(
-            f"[dim]mitmdump: capturing {host} for {duration}s "
-            f"on :{port} → {flows_file}[/dim]"
-        )
         proc = subprocess.Popen(
             [
-                "mitmdump",
+                binary,
                 "--listen-port", str(port),
                 "--flow-detail", "0",
                 "-w", str(flows_file),
@@ -107,6 +83,7 @@ def capture_traffic(target: str, port: int = 8080, duration: int = CAPTURE_DURAT
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            env=env,
         )
 
         time.sleep(duration)
@@ -130,15 +107,6 @@ def capture_traffic(target: str, port: int = 8080, duration: int = CAPTURE_DURAT
 
         return get_captured(target)
 
-    except FileNotFoundError:
-        return MitmResult(
-            target=target,
-            error=(
-                "mitmdump not found — install with:\n"
-                "  sudo apt install mitmproxy\n"
-                "  pip install mitmproxy"
-            ),
-        )
     except Exception as e:
         return MitmResult(target=target, error=f"Capture failed: {e}")
 
@@ -163,7 +131,7 @@ def get_captured(target: str) -> MitmResult:
             for flow in reader.stream():
                 if not isinstance(flow, HTTPFlow):
                     continue
-                req = flow.request
+                req  = flow.request
                 resp = flow.response
                 captured.append(CapturedRequest(
                     method=req.method,
@@ -179,7 +147,7 @@ def get_captured(target: str) -> MitmResult:
     except ImportError:
         return MitmResult(
             target=target,
-            error="mitmproxy Python package not installed — run: pip install mitmproxy",
+            error="mitmproxy Python package not installed — run: pip install mitmproxy>=10.0.0",
         )
     except Exception as e:
         return MitmResult(target=target, error=f"Failed to read flows: {e}")

@@ -1,8 +1,7 @@
-import shutil
-import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 from rich.console import Console
+from agent.core.subprocess_utils import run_tool, tool_exists
 
 console = Console()
 
@@ -31,7 +30,7 @@ class NiktoResult:
 
 
 def scan(target: str, flags: str = "") -> NiktoResult:
-    if not shutil.which("nikto"):
+    if not tool_exists("nikto"):
         from agent.core.tools_registry import REGISTRY
         _t = REGISTRY["nikto"]
         console.print(f"[dim yellow]nikto not found — running manual HTTP fingerprint. Install: {_t.apt}[/dim yellow]")
@@ -51,53 +50,25 @@ def scan(target: str, flags: str = "") -> NiktoResult:
             host = host[len(prefix):]
             break
 
-    command = ["nikto", "-h", host]
+    # -maxtime caps nikto's own internal timer; -nointeractive prevents prompts
+    command = ["nikto", "-h", host, "-maxtime", "120", "-nointeractive"]
     if flags:
         command += flags.split()
 
     console.print(f"[dim]running: {' '.join(command)}[/dim]")
 
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=180,
-        )
+    # subprocess timeout is 150s — 30s grace over nikto's own -maxtime 120
+    stdout, stderr, returncode = run_tool(command, timeout=150)
 
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
-
-        if result.returncode != 0 and not stdout.strip():
-            return NiktoResult(
-                target=target,
-                raw_output=stderr,
-                error=stderr or f"nikto exited with code {result.returncode}",
-            )
-
-        findings = parse_output(stdout)
-        return NiktoResult(target=target, findings=findings, raw_output=stdout)
-
-    except subprocess.TimeoutExpired:
+    if returncode != 0 and not stdout.strip():
         return NiktoResult(
             target=target,
-            error="nikto timed out after 180 seconds",
+            raw_output=stderr,
+            error=stderr or f"nikto exited with code {returncode}",
         )
 
-    except FileNotFoundError:
-        from agent.core import manual as _manual
-        console.print("[dim yellow]nikto not found — running manual HTTP fingerprint[/dim yellow]")
-        r = _manual.http_fingerprint(target)
-        summary = _manual.format_http_fingerprint(r)
-        findings = [
-            NiktoFinding(description=line.strip())
-            for line in summary.splitlines()
-            if line.strip() and not line.startswith("Manual HTTP")
-        ]
-        return NiktoResult(target=target, findings=findings, raw_output=summary)
-
-    except Exception as e:
-        return NiktoResult(target=target, error=str(e))
+    findings = parse_output(stdout)
+    return NiktoResult(target=target, findings=findings, raw_output=stdout)
 
 
 def parse_output(raw: str) -> list:

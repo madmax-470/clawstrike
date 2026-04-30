@@ -604,6 +604,79 @@ def _workflow_wizard() -> None:
     cfg = load_config()
 
 
+def _handle_pentest(cmd: str, scope, router) -> None:
+    """
+    Handle:  pentest <target> [--profile stealth|standard|thorough|full]
+
+    Shows engagement plan, requires y/n confirmation, then runs Methodology.
+    """
+    from agent.core.scan_profiles import get_profile, PROFILES
+
+    parts = cmd.split()
+    # parts[0] == "pentest", parts[1] == target, then optional --profile <name>
+    if len(parts) < 2:
+        console.print("[bold red]Usage:[/bold red] pentest <target> [--profile stealth|standard|thorough|full]")
+        return
+
+    target = parts[1]
+    profile_name = "standard"
+
+    if "--profile" in parts:
+        idx = parts.index("--profile")
+        if idx + 1 < len(parts):
+            profile_name = parts[idx + 1].lower()
+
+    profile = get_profile(profile_name)
+
+    # Scope check
+    in_scope, reason = scope.is_in_scope(target)
+    if not in_scope:
+        console.print(f"\n[bold red]🚫 SCOPE VIOLATION: {reason}[/bold red]")
+        if not scope.is_set():
+            console.print("[dim yellow]Tip: set scope first with: scope 192.168.1.0/24[/dim yellow]")
+        return
+
+    scope_display = scope.show() if scope.is_set() else "unrestricted (no scope set)"
+
+    console.print(Panel(
+        f"[bold]ClawStrike Engagement Plan[/bold]\n\n"
+        f"  Target  : [cyan]{target}[/cyan]\n"
+        f"  Profile : [yellow]{profile.name}[/yellow]  —  {profile.notes}\n"
+        f"  Scope   : {scope_display}\n\n"
+        f"  [dim]Phase 1[/dim]  Discovery        {profile.phase1_cmd.format(target=target)}\n"
+        f"  [dim]Phase 2[/dim]  Service ID       {profile.phase2_cmd.format(ports='<discovered>', target=target)}\n"
+        f"  [dim]Phase 3[/dim]  Targeted enum    per-service (gobuster/nikto/enum4linux/ssh-audit…)\n"
+        f"  [dim]Phase 4[/dim]  CVE analysis     AI-assisted vulnerability matching\n"
+        f"  [dim]Phase 5[/dim]  Exploit plan     Ranked options — [bold]human review required[/bold]\n"
+        f"  [dim]Phase 6[/dim]  Report           Written to engagements/{target}/",
+        title="Engagement Plan",
+        border_style="yellow",
+    ))
+
+    try:
+        confirm = console.input("\n[bold yellow]Proceed? [y/N] → [/bold yellow]").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Engagement cancelled.[/dim]")
+        return
+
+    if confirm != "y":
+        console.print("[dim]Engagement cancelled.[/dim]")
+        return
+
+    from agent.core.methodology import Methodology
+    methodology = Methodology(target=target, profile=profile, router=router)
+    result = methodology.run()
+
+    if "error" in result:
+        console.print(f"\n[bold red]Engagement stopped: {result['error']}[/bold red]")
+    else:
+        report = result.get("report")
+        if report:
+            console.print(f"\n[bold green]Engagement complete — report: {report}[/bold green]")
+        else:
+            console.print("\n[bold green]Engagement complete.[/bold green]")
+
+
 def _check_for_updates():
     """Silently check if remote has new commits. Prints one line if behind."""
     try:
@@ -658,7 +731,8 @@ def run():
         f"[bold red]ClawStrike OS[/bold red] [dim]v{VERSION} — agent ready[/dim]"
         f"{mode_line}"
         f"  [dim]build: {BUILD_DATE}[/dim]\n\n"
-        "[dim]commands: [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
+        "[dim]commands: [/dim][bold]pentest <target> [--profile stealth|standard|thorough|full][/bold]\n"
+        "[dim]           [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
         "[bold]scope clear[/bold][dim] · [/dim][bold]summary [target][/bold][dim] · [/dim]"
         "[bold]report <target>[/bold][dim] · [/dim][bold]tools[/bold][dim] · [/dim]"
         "[bold]tools install[/bold][dim] · [/dim][bold]exit[/bold]",
@@ -750,6 +824,10 @@ def run():
                 tool_name_arg = cmd[14:].strip()
                 install_tool(tool_name_arg)
                 available = check_tools(verbose=False)
+                continue
+
+            if cmd.lower().startswith("pentest "):
+                _handle_pentest(cmd, scope, router)
                 continue
 
             if user_input.strip().lower().startswith("report "):
