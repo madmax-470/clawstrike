@@ -20,6 +20,7 @@ from agent.core.scope import ScopeManager
 from agent.reports.generator import generate_report
 from agent.core.config import load_config, ModelConfig, save_workflow_config
 from agent.core.router import ModelRouter
+from agent.core.checker import check_tools, install_tool, install_missing
 
 load_dotenv()
 console = Console()
@@ -148,7 +149,7 @@ def _scope_check(target: str) -> str | None:
     return None
 
 
-def handle_tool_call(tool_line: str) -> tuple:
+def handle_tool_call(tool_line: str, available: dict) -> tuple:
     """Parse and execute a tool call from the agent. Returns (output, meta)."""
     try:
         parts = tool_line.replace("TOOL_CALL:", "").strip().split()
@@ -157,6 +158,22 @@ def handle_tool_call(tool_line: str) -> tuple:
             return "ERROR: empty tool call", {}
 
         tool_name = parts[0]
+
+        # registry key is the base name without _scan/_capture suffix
+        _registry_key = tool_name.replace("_scan", "").replace("_capture", "").replace("_search", "").replace("_exploit", "").replace("_sessions", "").replace("_post", "")
+        _registry_map = {
+            "nmap": "nmap", "gobuster": "gobuster", "sqlmap": "sqlmap",
+            "nikto": "nikto", "hydra": "hydra", "zap": "zaproxy",
+            "mitm": "mitmproxy", "msf": "metasploit",
+        }
+        _reg_name = _registry_map.get(_registry_key)
+        if _reg_name and not available.get(_reg_name, True):
+            from agent.core.tools_registry import REGISTRY
+            tool = REGISTRY[_reg_name]
+            fallback_note = " (manual fallback active)" if tool.fallback else f" Run: [yellow]{tool.apt}[/yellow]"
+            if not tool.fallback:
+                return f"{_reg_name} is not installed.{fallback_note}", {}
+            console.print(f"[dim yellow]{_reg_name} not found — using manual fallback[/dim yellow]")
 
         if tool_name == "nmap_scan":
             if len(parts) < 2:
@@ -403,7 +420,7 @@ def handle_tool_call(tool_line: str) -> tuple:
         return f"ERROR: tool execution failed — {str(e)}", {}
 
 
-def process_response(reply: str, history: list, router: ModelRouter) -> str:
+def process_response(reply: str, history: list, router: ModelRouter, available: dict) -> str:
     """
     Check if agent wants to call a tool.
     If yes, run it and feed result back to agent (using smart model for analysis).
@@ -421,7 +438,7 @@ def process_response(reply: str, history: list, router: ModelRouter) -> str:
     tool_results = []
     tool_metas = []
     for tool_line in tool_lines:
-        output, meta = handle_tool_call(tool_line)
+        output, meta = handle_tool_call(tool_line, available)
         if output is None:
             output = "Tool returned no output."
         tool_results.append(output)
@@ -625,6 +642,9 @@ def run():
     # ── Re-build router after potential wizard changes ─────────────────────────
     router = ModelRouter(cfg)
 
+    # ── Tool availability check ────────────────────────────────────────────────
+    available = check_tools(verbose=True)
+
     # ── Startup banner ─────────────────────────────────────────────────────────
     mode_line = ""
     if cfg.workflow == "multi":
@@ -640,7 +660,8 @@ def run():
         f"  [dim]build: {BUILD_DATE}[/dim]\n\n"
         "[dim]commands: [/dim][bold]scope <cidr>[/bold][dim] · [/dim][bold]scope show[/bold][dim] · [/dim]"
         "[bold]scope clear[/bold][dim] · [/dim][bold]summary [target][/bold][dim] · [/dim]"
-        "[bold]report <target>[/bold][dim] · [/dim][bold]exit[/bold]",
+        "[bold]report <target>[/bold][dim] · [/dim][bold]tools[/bold][dim] · [/dim]"
+        "[bold]tools install[/bold][dim] · [/dim][bold]exit[/bold]",
         border_style="red"
     ))
 
@@ -716,6 +737,21 @@ def run():
                 console.print(Markdown(summary))
                 continue
 
+            if cmd.lower() == "tools":
+                available = check_tools(verbose=True)
+                continue
+
+            if cmd.lower() == "tools install":
+                install_missing(available)
+                available = check_tools(verbose=False)
+                continue
+
+            if cmd.lower().startswith("tools install "):
+                tool_name_arg = cmd[14:].strip()
+                install_tool(tool_name_arg)
+                available = check_tools(verbose=False)
+                continue
+
             if user_input.strip().lower().startswith("report "):
                 target = user_input.strip()[7:].strip()
                 with console.status(f"[dim]generating report for {target}...[/dim]", spinner="dots"):
@@ -743,7 +779,7 @@ def run():
                 "content": reply
             })
 
-            final = process_response(reply, history, router)
+            final = process_response(reply, history, router, available)
 
             console.print(f"\n[bold blue]agent →[/bold blue]")
             console.print(Markdown(final))

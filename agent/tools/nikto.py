@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
@@ -30,6 +31,20 @@ class NiktoResult:
 
 
 def scan(target: str, flags: str = "") -> NiktoResult:
+    if not shutil.which("nikto"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["nikto"]
+        console.print(f"[dim yellow]nikto not found — running manual HTTP fingerprint. Install: {_t.apt}[/dim yellow]")
+        from agent.core import manual as _manual
+        r = _manual.http_fingerprint(target)
+        summary = _manual.format_http_fingerprint(r)
+        findings = [
+            NiktoFinding(description=line.strip())
+            for line in summary.splitlines()
+            if line.strip() and not line.startswith("Manual HTTP")
+        ]
+        return NiktoResult(target=target, findings=findings, raw_output=summary)
+
     host = target
     for prefix in ("http://", "https://"):
         if host.startswith(prefix):

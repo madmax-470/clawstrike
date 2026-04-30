@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -23,6 +24,18 @@ class ScanResult:
 
 
 def scan(target: str, flags: str = "") -> ScanResult:
+    if not shutil.which("nmap"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["nmap"]
+        console.print(f"[dim yellow]nmap not found — using manual port scan. Install: {_t.apt}[/dim yellow]")
+        from agent.core import manual as _manual
+        r = _manual.port_scan(target)
+        host_obj = Host(ip=r["host"], hostname="", status="up", ports=r["open_ports"])
+        return ScanResult(
+            hosts=[host_obj] if r["open_ports"] else [],
+            raw_output=_manual.format_port_scan(r),
+        )
+
     # clean any conflicting flags
     clean_flags = [f for f in flags.split() if f not in ["-oX", "-"]]
     command = ["nmap", "-oX", "-"] + clean_flags + [target]

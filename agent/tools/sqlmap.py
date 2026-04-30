@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import re
 from dataclasses import dataclass, field
@@ -17,6 +18,14 @@ class SqlmapResult:
 
 
 def scan(target: str, flags: str = "") -> SqlmapResult:
+    if not shutil.which("sqlmap"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["sqlmap"]
+        return SqlmapResult(
+            target=target,
+            error=f"sqlmap not installed. Run: {_t.apt}",
+        )
+
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"http://{target}"
 

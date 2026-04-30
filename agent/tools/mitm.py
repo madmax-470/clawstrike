@@ -1,4 +1,5 @@
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -80,6 +81,14 @@ def start_proxy(port: int = 8080) -> Optional[str]:
 
 def capture_traffic(target: str, port: int = 8080, duration: int = CAPTURE_DURATION) -> MitmResult:
     """Run mitmdump for `duration` seconds, capturing traffic from `target`."""
+    if not shutil.which("mitmdump"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["mitmproxy"]
+        return MitmResult(
+            target=target,
+            error=f"mitmproxy not installed. Run: {_t.apt}",
+        )
+
     host = _extract_host(target)
     flows_file = _flows_path(target)
 

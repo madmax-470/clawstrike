@@ -85,18 +85,15 @@ def _ensure_zap_running() -> Optional[str]:
     zap_bin = _resolve_zap_bin()
 
     if zap_bin is None:
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["zaproxy"]
         tried = "\n".join(f"  {p}" for p in _ZAP_KNOWN_PATHS)
         return (
-            "ZAP binary not found. Tried:\n"
+            f"zaproxy not installed. Run: {_t.apt}\n\n"
+            "Searched paths:\n"
             f"{tried}\n"
             "  zap.sh / zaproxy on PATH\n\n"
-            "Fix options:\n"
-            "  macOS  : brew install --cask zap\n"
-            "           (binary will be at /Applications/ZAP.app/Contents/Java/zap.sh)\n"
-            "  Linux  : sudo apt install zaproxy\n"
-            "  Manual : set tools.zap_path in config.yaml to your ZAP binary path\n"
-            f"  Or start ZAP manually: <zap.sh> -daemon -port {ZAP_PORT} "
-            f"-config api.key={ZAP_API_KEY}"
+            "Or start ZAP manually and set tools.zap_path in config.yaml."
         )
 
     try:

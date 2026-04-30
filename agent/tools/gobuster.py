@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
@@ -17,6 +18,16 @@ class GobusterResult:
 
 
 def scan(target: str, flags: str = "") -> GobusterResult:
+    if not shutil.which("gobuster"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["gobuster"]
+        console.print(f"[dim yellow]gobuster not found — probing common paths manually. Install: {_t.apt}[/dim yellow]")
+        if not target.startswith("http://") and not target.startswith("https://"):
+            target = f"http://{target}"
+        from agent.core import manual as _manual
+        found = _manual.probe_common_paths(target)
+        return GobusterResult(target=target, found_paths=found, raw_output="\n".join(found))
+
     # ensure target has a scheme
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"http://{target}"

@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import re
 from dataclasses import dataclass, field
@@ -25,6 +26,15 @@ class HydraResult:
 
 
 def scan(target: str, service: str, flags: str = "") -> HydraResult:
+    if not shutil.which("hydra"):
+        from agent.core.tools_registry import REGISTRY
+        _t = REGISTRY["hydra"]
+        return HydraResult(
+            target=target,
+            service=service,
+            error=f"hydra not installed. Run: {_t.apt}",
+        )
+
     command = ["hydra"]
     if flags:
         command += flags.split()

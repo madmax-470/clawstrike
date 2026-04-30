@@ -28,8 +28,42 @@ apt-get install -y -qq python3 python3-venv python3-pip \
 success "System dependencies installed"
 
 # ─── 2. Pentest tools ─────────────────────────────────────────────────────────
+# To add/remove a tool: edit this list and the REGISTRY in agent/core/tools_registry.py
 step "Installing pentest tools"
-apt-get install -y -qq nmap gobuster sqlmap nikto hydra zaproxy mitmproxy
+apt-get update -qq
+
+# nmap — network discovery and port scanning (CRITICAL)
+apt-get install -y -qq nmap
+
+# gobuster — directory and DNS brute-forcing
+apt-get install -y -qq gobuster
+
+# sqlmap — automated SQL injection detection and exploitation
+apt-get install -y -qq sqlmap
+
+# nikto — web server vulnerability scanner
+apt-get install -y -qq nikto
+
+# hydra — credential brute-forcing (SSH, FTP, HTTP, etc.)
+apt-get install -y -qq hydra
+
+# zaproxy — OWASP ZAP web application active scanner
+apt-get install -y -qq zaproxy
+
+# mitmproxy — interactive HTTPS traffic interception proxy
+apt-get install -y -qq mitmproxy
+
+# ffuf — fast web fuzzer for content discovery
+apt-get install -y -qq ffuf
+
+# ssh-audit — SSH server configuration and cipher auditing
+apt-get install -y -qq ssh-audit
+
+# enum4linux — SMB/NetBIOS enumeration for Windows/Samba hosts
+apt-get install -y -qq enum4linux
+
+# netexec — network service enumeration and credential testing (CrackMapExec successor)
+apt-get install -y -qq netexec
 success "nmap  gobuster  sqlmap  nikto  hydra  zaproxy  mitmproxy — installed"
 
 # Metasploit is not in default Debian/Ubuntu repos — use Rapid7's apt repo
