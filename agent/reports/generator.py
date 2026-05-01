@@ -8,10 +8,22 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import parse_xml
 
-from agent.core.session import ENGAGEMENTS_DIR as _ENG_DIR, REPORTS_DIR as _REP_DIR
+def _get_project_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "config.yaml").exists():
+            return parent
+    fallback = Path.home() / "clawstrike"
+    if fallback.exists():
+        return fallback
+    return Path.cwd()
 
-ENGAGEMENTS_DIR = Path(_ENG_DIR)
-REPORTS_DIR     = Path(_REP_DIR)
+
+_PROJECT_ROOT = _get_project_root()
+ENGAGEMENTS_DIR = _PROJECT_ROOT / "engagements"
+REPORTS_DIR     = _PROJECT_ROOT / "reports"
+ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # CVSS baseline estimates by service name
 CVSS_MAP = {

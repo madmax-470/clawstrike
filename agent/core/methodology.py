@@ -5,9 +5,23 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from agent.core.intelligence import intelligence, Answer
-from agent.core.session import EngagementSession, ExploitOption, ENGAGEMENTS_DIR
+from agent.core.session import EngagementSession, ExploitOption
 
-_ENGAGEMENTS_DIR = Path(ENGAGEMENTS_DIR)
+
+def _get_project_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "config.yaml").exists():
+            return parent
+    fallback = Path.home() / "clawstrike"
+    if fallback.exists():
+        return fallback
+    return Path.cwd()
+
+
+_PROJECT_ROOT = _get_project_root()
+_ENGAGEMENTS_DIR = _PROJECT_ROOT / "engagements"
+_ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 _PHASE4_SYSTEM = (
     "You are a senior penetration tester. "

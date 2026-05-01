@@ -2,9 +2,21 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from agent.core.session import ENGAGEMENTS_DIR as _ENG_DIR
 
-ENGAGEMENTS_DIR = Path(_ENG_DIR)
+def _get_project_root() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "config.yaml").exists():
+            return parent
+    fallback = Path.home() / "clawstrike"
+    if fallback.exists():
+        return fallback
+    return Path.cwd()
+
+
+_PROJECT_ROOT = _get_project_root()
+ENGAGEMENTS_DIR = _PROJECT_ROOT / "engagements"
+ENGAGEMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_engagement(target: str, scan_result, analysis: str, scope: list = None) -> str:

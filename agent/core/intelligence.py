@@ -497,7 +497,26 @@ class PentestIntelligence:
             self._fail("gobuster", "not installed")
             attempts.append(Attempt("gobuster", False, "not installed"))
 
-        # Method 2: ffuf
+        # Method 2: webscanner (threaded urllib — works without external tools)
+        self._trying(f"webscanner → {target}:{context.get('port', 80)}")
+        try:
+            from agent.tools.webscanner import scan as ws_scan, format_for_agent as ws_fmt
+            port = context.get("port", 80)
+            ssl = port == 443 or context.get("ssl", False)
+            ws_result = ws_scan(target, port=port, ssl=ssl)
+            if ws_result:
+                self._ok("webscanner", f"{len(ws_result)} paths found")
+                return Answer("what_web_paths_exist", target, True, "webscanner",
+                              {"paths": list(ws_result.keys()),
+                               "formatted": ws_fmt(target, ws_result)},
+                              attempts=attempts + [Attempt("webscanner", True)])
+            attempts.append(Attempt("webscanner", False, "no paths found"))
+            self._fail("webscanner", "no paths found")
+        except Exception as e:
+            attempts.append(Attempt("webscanner", False, str(e)))
+            self._fail("webscanner", str(e))
+
+        # Method 3: ffuf (external tool)
         self._trying(f"ffuf → {http_target}")
         if _tool_exists("ffuf"):
             try:
@@ -523,7 +542,7 @@ class PentestIntelligence:
             self._fail("ffuf", "not installed")
             attempts.append(Attempt("ffuf", False, "not installed"))
 
-        # Method 3: dirb
+        # Method 4: dirb
         self._trying(f"dirb {http_target}")
         if _tool_exists("dirb"):
             try:
@@ -543,7 +562,7 @@ class PentestIntelligence:
             self._fail("dirb", "not installed")
             attempts.append(Attempt("dirb", False, "not installed"))
 
-        # Method 4: manual urllib common paths
+        # Method 5: manual urllib common paths (hardcoded list, no wordlist needed)
         self._trying("manual urllib common paths")
         paths = _manual_path_check(http_target)
         self._ok("manual urllib", f"{len(paths)} paths found")
