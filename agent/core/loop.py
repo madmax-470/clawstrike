@@ -24,6 +24,7 @@ from agent.core.checker import check_tools, install_tool, install_missing
 from agent.core.exploit_runner import exploit_runner
 from agent.core.post_exploit import post_exploiter
 from agent.core.session import EngagementSession
+from agent.core.model_router import ModelRouter as NewModelRouter
 
 load_dotenv()
 console = Console()
@@ -499,7 +500,7 @@ def process_response(reply: str, history: list, router: ModelRouter, available: 
     })
 
     with console.status("[dim]agent analyzing results...[/dim]", spinner="dots"):
-        final_reply = router.chat("analyze", SYSTEM_PROMPT, history)
+        final_reply = router.legacy_chat("analyze", SYSTEM_PROMPT, history)
     history.append({
         "role": "assistant",
         "content": final_reply
@@ -718,19 +719,13 @@ def run():
             _workflow_wizard()
 
     # ── Re-build router after potential wizard changes ─────────────────────────
-    router = ModelRouter(cfg)
+    router = NewModelRouter.from_config()
 
     # ── Tool availability check ────────────────────────────────────────────────
     available = check_tools(verbose=True)
 
     # ── Startup banner ─────────────────────────────────────────────────────────
-    mode_line = ""
-    if cfg.workflow == "multi":
-        fast_name  = cfg.fast_model.model  if cfg.fast_model  else "?"
-        smart_name = cfg.smart_model.model if cfg.smart_model else "?"
-        mode_line  = f"\n[bold cyan]⚡ multi-model mode:[/bold cyan] [dim]fast=[{fast_name}]  smart=[{smart_name}][/dim]"
-    else:
-        mode_line = f"\n[dim]provider: {cfg.provider}  |  model: {cfg.model}[/dim]"
+    mode_line = f"\n[dim]{router.mode_label}[/dim]"
 
     console.print(Panel(
         f"[bold red]ClawStrike OS[/bold red] [dim]v{VERSION} — agent ready[/dim]"
@@ -811,7 +806,7 @@ def run():
                 )
 
                 with console.status("[dim]generating summary...[/dim]", spinner="dots"):
-                    summary = router.chat(
+                    summary = router.legacy_chat(
                         "report", SYSTEM_PROMPT,
                         [{"role": "user", "content": summary_prompt}]
                     )
@@ -950,7 +945,7 @@ def run():
             })
 
             with console.status("[dim]agent thinking...[/dim]", spinner="dots"):
-                reply = router.chat("plan", SYSTEM_PROMPT, history)
+                reply = router.legacy_chat("plan", SYSTEM_PROMPT, history)
 
             if reply is None:
                 console.print("[red]agent returned empty response[/red]")

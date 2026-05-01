@@ -1,5 +1,3 @@
-import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -11,41 +9,11 @@ from agent.core.session import EngagementSession, ExploitOption, ENGAGEMENTS_DIR
 
 _ENGAGEMENTS_DIR = Path(ENGAGEMENTS_DIR)
 
-_PHASE4_SYSTEM_PROMPT = """\
-You are a vulnerability analyst. Return ONLY a JSON object. \
-No markdown. No explanation. No code blocks.
-
-Rules for the JSON you return:
-- Use double quotes only, never single quotes
-- No apostrophes inside string values (write cannot instead of can't)
-- No newlines inside string values
-- No trailing commas
-- Keep ALL string values under 80 characters
-- notes field: maximum 60 characters, plain text only
-- If unsure about a field, use empty string not null
-
-Return this exact structure:
-{
-  "exploits": [
-    {
-      "title": "vsftpd 2.3.4 Backdoor",
-      "cve": "CVE-2011-2523",
-      "cvss": 10.0,
-      "port": 21,
-      "service": "ftp",
-      "version": "2.3.4",
-      "msf_module": "exploit/unix/ftp/vsftpd_234_backdoor",
-      "manual_cmd": "nc -v {target} 6200",
-      "confidence": "high",
-      "notes": "Backdoor triggered by smiley in username"
-    }
-  ]
-}
-
-Sort by cvss descending.
-Include only exploits you are highly confident about.
-Omit services with no known exploits.\
-"""
+_PHASE4_SYSTEM = (
+    "You are a senior penetration tester. "
+    "Call add_exploit for each exploitable vulnerability you identify. "
+    "Only include vulnerabilities you are confident about."
+)
 
 console = Console()
 
@@ -297,56 +265,91 @@ class Methodology:
     # ------------------------------------------------------------------ #
     def run_phase4(self, services: dict, phase3_results: dict,
                    session: EngagementSession) -> str:
-        """Calls Claude with a JSON-only prompt and parses exploits into session."""
+        """Uses router.smart.call_with_tools() — no JSON parsing required."""
         console.print(Panel("[bold]Phase 4 — CVE & Vulnerability Analysis[/bold]", style="blue"))
 
-        service_lines = "\n".join(
-            f"  Port {port}: {info.get('service', '')} {info.get('version', '')}"
+        service_lines = [
+            f"{port}/tcp {info.get('service', '')} {info.get('version', '')}"
             for port, info in services.items()
-        )
-        phase3_summary = "\n".join(
-            f"  [{r.tool}] [{r.method_used}]: "
-            f"{'answered' if r.success else 'FAILED'} — "
-            f"{(r.output or r.error)[:200]}"
-            for r in phase3_results.values()
-        )
-        user_prompt = (
-            f"Target: {self.target}\n\nServices:\n{service_lines}\n\n"
-            f"Enumeration findings:\n{phase3_summary}"
+        ]
+
+        tools = [{
+            "name": "add_exploit",
+            "description": "Add an exploitable vulnerability found on the target",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title":      {"type": "string"},
+                    "cve":        {"type": "string"},
+                    "cvss":       {"type": "number"},
+                    "port":       {"type": "integer"},
+                    "service":    {"type": "string"},
+                    "version":    {"type": "string"},
+                    "msf_module": {"type": "string"},
+                    "manual_cmd": {"type": "string"},
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
+                    "notes": {"type": "string"},
+                },
+                "required": [
+                    "title", "cve", "cvss", "port", "service",
+                    "version", "msf_module", "manual_cmd", "confidence", "notes",
+                ],
+            },
+        }]
+
+        user_content = (
+            f"Analyze services on {self.target} and call add_exploit "
+            f"for each exploitable vulnerability:\n\n"
+            + "\n".join(service_lines)
         )
 
         try:
-            raw = self.router.chat(
-                "analyze",
-                system=_PHASE4_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                max_tokens=1500,
+            tool_calls = self.router.smart.call_with_tools(
+                messages=[{"role": "user", "content": user_content}],
+                tools=tools,
+                system=_PHASE4_SYSTEM,
+                max_tokens=4096,
             )
         except Exception as e:
             console.print(f"[red]❌ Phase 4: AI call failed — {e}[/red]")
             self.state.cve_analysis = str(e)
             return str(e)
 
-        import os
-        if os.environ.get("CLAWSTRIKE_DEBUG"):
-            try:
-                with open("/tmp/clawstrike_phase4_debug.txt", "w") as f:
-                    f.write(raw)
-                console.print("[dim]Phase 4 response saved to /tmp/clawstrike_phase4_debug.txt[/dim]")
-            except Exception:
-                pass
-
-        parse_exploit_options(sanitize_json(raw), session)
-        self.state.cve_analysis = raw
-        self.state.exploit_options = [vars(o) for o in session.exploit_options]
+        for call in tool_calls:
+            if call["name"] == "add_exploit":
+                inp = call["input"]
+                try:
+                    option = ExploitOption(
+                        number=0,
+                        title=str(inp.get("title", "")),
+                        cve=str(inp.get("cve", "")),
+                        cvss=float(inp.get("cvss", 0)),
+                        port=int(inp.get("port", 0)),
+                        service=str(inp.get("service", "")),
+                        version=str(inp.get("version", "")),
+                        msf_module=str(inp.get("msf_module", "")),
+                        manual_cmd=str(inp.get("manual_cmd", "")),
+                        confidence=str(inp.get("confidence", "low")),
+                        notes=str(inp.get("notes", "")),
+                    )
+                    session.add_exploit(option)
+                except (ValueError, TypeError) as e:
+                    console.print(f"[yellow]Skipping malformed tool call: {e}[/yellow]")
 
         n = len(session.exploit_options)
+        self.state.exploit_options = [vars(o) for o in session.exploit_options]
+        summary = f"{n} exploit option(s) identified via tool calls"
+        self.state.cve_analysis = summary
+
         if n:
             console.print(f"[green]✅ Phase 4 complete — {n} exploit option(s) identified[/green]")
         else:
             console.print("[yellow]⚠ Phase 4 complete — no exploitable vulnerabilities identified[/yellow]")
 
-        return raw
+        return summary
 
     # ------------------------------------------------------------------ #
     # Phase 5 — Exploitation Planning (human-gated)
@@ -479,110 +482,6 @@ class Methodology:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def sanitize_json(text: str) -> str:
-    """Clean common Claude JSON formatting issues before parsing."""
-    # remove control characters (keep tab/newline for structure, strip others)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    # replace smart quotes with straight quotes
-    text = (
-        text.replace("‘", "'").replace("’", "'")
-            .replace("“", '"').replace("”", '"')
-    )
-    # remove trailing commas before } or ]
-    text = re.sub(r",(\s*[}\]])", r"\1", text)
-    # extract just the JSON object
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return text
-
-
-def parse_exploit_options(claude_response: str, session: EngagementSession) -> None:
-    """Parse Claude's JSON exploit response and populate session.exploit_options.
-
-    Tries four progressively more forgiving extraction methods so that
-    minor formatting deviations from Claude don't lose all exploit data.
-    """
-    text = claude_response.strip()
-
-    # Method 1: direct parse
-    try:
-        data = json.loads(text)
-        _load_exploits(data, session)
-        return
-    except json.JSONDecodeError:
-        pass
-
-    # Method 2: extract from markdown fences  ```json ... ```
-    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if json_match:
-        try:
-            data = json.loads(json_match.group(1))
-            _load_exploits(data, session)
-            return
-        except json.JSONDecodeError:
-            pass
-
-    # Method 3: first { to last }
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            data = json.loads(text[start : end + 1])
-            _load_exploits(data, session)
-            return
-        except json.JSONDecodeError:
-            pass
-
-    # Method 4: strip trailing commas + control characters, then retry
-    cleaned = re.sub(r",\s*([}\]])", r"\1", text)
-    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", cleaned)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1:
-        try:
-            data = json.loads(cleaned[start : end + 1])
-            _load_exploits(data, session)
-            return
-        except json.JSONDecodeError as e:
-            console.print(f"[red]CVE parsing failed after all attempts: {e}[/red]")
-            console.print("[dim]Continuing without structured exploit options[/dim]")
-            return
-
-    console.print("[red]CVE parsing failed: no JSON object found in response[/red]")
-    console.print("[dim]Continuing without structured exploit options[/dim]")
-
-
-def _load_exploits(data: dict, session: EngagementSession) -> None:
-    """Load exploits from a parsed JSON dict into session."""
-    exploits = data.get("exploits", [])
-    if not exploits:
-        console.print("[yellow]⚠ Claude returned no exploits for these services[/yellow]")
-        return
-
-    for item in exploits:
-        try:
-            option = ExploitOption(
-                number=0,
-                title=str(item.get("title", "")),
-                cve=str(item.get("cve", "")),
-                cvss=float(item.get("cvss", 0)),
-                port=int(item.get("port", 0)),
-                service=str(item.get("service", "")),
-                version=str(item.get("version", "")),
-                msf_module=str(item.get("msf_module", "")),
-                manual_cmd=str(item.get("manual_cmd", "")),
-                confidence=str(item.get("confidence", "low")),
-                notes=str(item.get("notes", "")),
-            )
-            session.add_exploit(option)
-        except (ValueError, TypeError) as e:
-            console.print(f"[yellow]Skipping malformed exploit entry: {e}[/yellow]")
-
-    console.print(f"[green]✅ {len(session.exploit_options)} exploit option(s) loaded[/green]")
-
 
 def _answer_to_result(question: str, ans: Answer) -> ToolResult:
     """Convert an Answer into a ToolResult for phase status tracking."""
