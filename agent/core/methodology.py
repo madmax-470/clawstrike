@@ -12,13 +12,19 @@ from agent.core.session import EngagementSession, ExploitOption, ENGAGEMENTS_DIR
 _ENGAGEMENTS_DIR = Path(ENGAGEMENTS_DIR)
 
 _PHASE4_SYSTEM_PROMPT = """\
-You are a vulnerability analyst. Given a list of services and versions found \
-on a target, identify exploitable vulnerabilities.
+You are a vulnerability analyst. Return ONLY a JSON object. \
+No markdown. No explanation. No code blocks.
 
-You MUST respond with valid JSON only.
-No markdown. No explanation. Just JSON.
+Rules for the JSON you return:
+- Use double quotes only, never single quotes
+- No apostrophes inside string values (write cannot instead of can't)
+- No newlines inside string values
+- No trailing commas
+- Keep ALL string values under 80 characters
+- notes field: maximum 60 characters, plain text only
+- If unsure about a field, use empty string not null
 
-Format:
+Return this exact structure:
 {
   "exploits": [
     {
@@ -31,26 +37,14 @@ Format:
       "msf_module": "exploit/unix/ftp/vsftpd_234_backdoor",
       "manual_cmd": "nc -v {target} 6200",
       "confidence": "high",
-      "notes": "Backdoor triggered by :) in username"
+      "notes": "Backdoor triggered by smiley in username"
     }
   ]
 }
 
 Sort by cvss descending.
-Include msf_module if a Metasploit module exists.
-Include manual_cmd if exploit can be done manually.
-Only include exploits you are confident about.
-If no exploits known for a service, omit it.
-
-STRICT JSON RULES:
-- No trailing commas
-- All strings must use double quotes
-- No single quotes anywhere
-- No comments inside JSON
-- No newlines inside string values (use \\n if needed)
-- Escape any double quotes inside strings
-- Return ONLY the JSON object
-- Do not wrap in markdown code blocks\
+Include only exploits you are highly confident about.
+Omit services with no known exploits.\
 """
 
 console = Console()
@@ -326,14 +320,23 @@ class Methodology:
                 "analyze",
                 system=_PHASE4_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
-                max_tokens=2048,
+                max_tokens=1500,
             )
         except Exception as e:
             console.print(f"[red]❌ Phase 4: AI call failed — {e}[/red]")
             self.state.cve_analysis = str(e)
             return str(e)
 
-        parse_exploit_options(raw, session)
+        import os
+        if os.environ.get("CLAWSTRIKE_DEBUG"):
+            try:
+                with open("/tmp/clawstrike_phase4_debug.txt", "w") as f:
+                    f.write(raw)
+                console.print("[dim]Phase 4 response saved to /tmp/clawstrike_phase4_debug.txt[/dim]")
+            except Exception:
+                pass
+
+        parse_exploit_options(sanitize_json(raw), session)
         self.state.cve_analysis = raw
         self.state.exploit_options = [vars(o) for o in session.exploit_options]
 
@@ -476,6 +479,25 @@ class Methodology:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def sanitize_json(text: str) -> str:
+    """Clean common Claude JSON formatting issues before parsing."""
+    # remove control characters (keep tab/newline for structure, strip others)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    # replace smart quotes with straight quotes
+    text = (
+        text.replace("‘", "'").replace("’", "'")
+            .replace("“", '"').replace("”", '"')
+    )
+    # remove trailing commas before } or ]
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    # extract just the JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
 
 def parse_exploit_options(claude_response: str, session: EngagementSession) -> None:
     """Parse Claude's JSON exploit response and populate session.exploit_options.

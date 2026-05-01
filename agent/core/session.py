@@ -9,31 +9,35 @@ from typing import Optional
 
 def get_base_dir() -> str:
     """
-    Find the ClawStrike base directory dynamically.
+    Find the ClawStrike project root dynamically.
 
     Tries in order:
     1. CLAWSTRIKE_HOME environment variable
-    2. Parent of the agent/ directory (where this file lives), if writable
-    3. ~/clawstrike (home directory fallback)
-    4. /opt/clawstrike (system install fallback — last resort)
+    2. Walk up from this file to find the dir containing config.yaml
+    3. ~/clawstrike if it exists
+    4. Current working directory as last resort
     """
     # 1. explicit env var override
     if os.environ.get("CLAWSTRIKE_HOME"):
         return os.environ["CLAWSTRIKE_HOME"]
 
-    # 2. derive from this file: agent/core/session.py → go up 2 levels
-    this_file = os.path.abspath(__file__)
-    derived = os.path.dirname(os.path.dirname(os.path.dirname(this_file)))
-    if os.path.exists(derived) and os.access(derived, os.W_OK):
-        return derived
+    # 2. walk up: session.py → core/ → agent/ → clawstrike/
+    current = os.path.abspath(__file__)
+    project_root = os.path.dirname(   # clawstrike/
+        os.path.dirname(              # agent/
+            os.path.dirname(current)  # core/
+        )
+    )
+    if os.path.exists(os.path.join(project_root, "config.yaml")):
+        return project_root
 
     # 3. home directory fallback
     home_path = os.path.expanduser("~/clawstrike")
-    if os.path.exists(home_path) and os.access(home_path, os.W_OK):
+    if os.path.exists(home_path):
         return home_path
 
     # 4. last resort
-    return "/opt/clawstrike"
+    return os.getcwd()
 
 
 BASE_DIR = get_base_dir()
