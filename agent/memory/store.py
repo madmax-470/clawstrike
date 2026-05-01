@@ -2,8 +2,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from agent.core.session import ENGAGEMENTS_DIR as _ENG_DIR
 
-ENGAGEMENTS_DIR = Path(__file__).resolve().parents[2] / "engagements"
+ENGAGEMENTS_DIR = Path(_ENG_DIR)
 
 
 def save_engagement(target: str, scan_result, analysis: str, scope: list = None) -> str:

@@ -1,7 +1,47 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+# ── Base directory resolution ─────────────────────────────────────────────────
+
+def get_base_dir() -> str:
+    """
+    Find the ClawStrike base directory dynamically.
+
+    Tries in order:
+    1. CLAWSTRIKE_HOME environment variable
+    2. Parent of the agent/ directory (where this file lives), if writable
+    3. ~/clawstrike (home directory fallback)
+    4. /opt/clawstrike (system install fallback — last resort)
+    """
+    # 1. explicit env var override
+    if os.environ.get("CLAWSTRIKE_HOME"):
+        return os.environ["CLAWSTRIKE_HOME"]
+
+    # 2. derive from this file: agent/core/session.py → go up 2 levels
+    this_file = os.path.abspath(__file__)
+    derived = os.path.dirname(os.path.dirname(os.path.dirname(this_file)))
+    if os.path.exists(derived) and os.access(derived, os.W_OK):
+        return derived
+
+    # 3. home directory fallback
+    home_path = os.path.expanduser("~/clawstrike")
+    if os.path.exists(home_path) and os.access(home_path, os.W_OK):
+        return home_path
+
+    # 4. last resort
+    return "/opt/clawstrike"
+
+
+BASE_DIR = get_base_dir()
+ENGAGEMENTS_DIR = os.path.join(BASE_DIR, "engagements")
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
+
+os.makedirs(ENGAGEMENTS_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
 @dataclass

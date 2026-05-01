@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -6,9 +7,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from agent.core.intelligence import intelligence, Answer
-from agent.core.session import EngagementSession, ExploitOption
+from agent.core.session import EngagementSession, ExploitOption, ENGAGEMENTS_DIR
 
-_ENGAGEMENTS_DIR = Path(__file__).resolve().parents[2] / "engagements"
+_ENGAGEMENTS_DIR = Path(ENGAGEMENTS_DIR)
 
 _PHASE4_SYSTEM_PROMPT = """\
 You are a vulnerability analyst. Given a list of services and versions found \
@@ -39,7 +40,17 @@ Sort by cvss descending.
 Include msf_module if a Metasploit module exists.
 Include manual_cmd if exploit can be done manually.
 Only include exploits you are confident about.
-If no exploits known for a service, omit it.\
+If no exploits known for a service, omit it.
+
+STRICT JSON RULES:
+- No trailing commas
+- All strings must use double quotes
+- No single quotes anywhere
+- No comments inside JSON
+- No newlines inside string values (use \\n if needed)
+- Escape any double quotes inside strings
+- Return ONLY the JSON object
+- Do not wrap in markdown code blocks\
 """
 
 console = Console()
@@ -467,40 +478,88 @@ class Methodology:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def parse_exploit_options(claude_response: str, session: EngagementSession) -> None:
-    """Parse Claude's JSON exploit response and populate session.exploit_options."""
-    clean = claude_response.strip()
-    if clean.startswith("```"):
-        parts = clean.split("```")
-        clean = parts[1] if len(parts) > 1 else clean
-        if clean.startswith("json"):
-            clean = clean[4:]
-        clean = clean.strip()
+    """Parse Claude's JSON exploit response and populate session.exploit_options.
 
+    Tries four progressively more forgiving extraction methods so that
+    minor formatting deviations from Claude don't lose all exploit data.
+    """
+    text = claude_response.strip()
+
+    # Method 1: direct parse
     try:
-        data = json.loads(clean)
-    except json.JSONDecodeError as e:
-        console.print(f"[red]CVE parsing failed: {e}[/red]")
-        console.print("[dim]Phase 4 incomplete — exploit options unavailable[/dim]")
+        data = json.loads(text)
+        _load_exploits(data, session)
+        return
+    except json.JSONDecodeError:
+        pass
+
+    # Method 2: extract from markdown fences  ```json ... ```
+    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            _load_exploits(data, session)
+            return
+        except json.JSONDecodeError:
+            pass
+
+    # Method 3: first { to last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            _load_exploits(data, session)
+            return
+        except json.JSONDecodeError:
+            pass
+
+    # Method 4: strip trailing commas + control characters, then retry
+    cleaned = re.sub(r",\s*([}\]])", r"\1", text)
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1:
+        try:
+            data = json.loads(cleaned[start : end + 1])
+            _load_exploits(data, session)
+            return
+        except json.JSONDecodeError as e:
+            console.print(f"[red]CVE parsing failed after all attempts: {e}[/red]")
+            console.print("[dim]Continuing without structured exploit options[/dim]")
+            return
+
+    console.print("[red]CVE parsing failed: no JSON object found in response[/red]")
+    console.print("[dim]Continuing without structured exploit options[/dim]")
+
+
+def _load_exploits(data: dict, session: EngagementSession) -> None:
+    """Load exploits from a parsed JSON dict into session."""
+    exploits = data.get("exploits", [])
+    if not exploits:
+        console.print("[yellow]⚠ Claude returned no exploits for these services[/yellow]")
         return
 
-    for exploit in data.get("exploits", []):
+    for item in exploits:
         try:
             option = ExploitOption(
-                number=0,  # set by session.add_exploit
-                title=exploit.get("title", ""),
-                cve=exploit.get("cve", ""),
-                cvss=float(exploit.get("cvss", 0)),
-                port=int(exploit.get("port", 0)),
-                service=exploit.get("service", ""),
-                version=exploit.get("version", ""),
-                msf_module=exploit.get("msf_module", ""),
-                manual_cmd=exploit.get("manual_cmd", ""),
-                confidence=exploit.get("confidence", "low"),
-                notes=exploit.get("notes", ""),
+                number=0,
+                title=str(item.get("title", "")),
+                cve=str(item.get("cve", "")),
+                cvss=float(item.get("cvss", 0)),
+                port=int(item.get("port", 0)),
+                service=str(item.get("service", "")),
+                version=str(item.get("version", "")),
+                msf_module=str(item.get("msf_module", "")),
+                manual_cmd=str(item.get("manual_cmd", "")),
+                confidence=str(item.get("confidence", "low")),
+                notes=str(item.get("notes", "")),
             )
             session.add_exploit(option)
-        except (KeyError, ValueError, TypeError) as e:
-            console.print(f"[dim red]skipping malformed exploit entry: {e}[/dim red]")
+        except (ValueError, TypeError) as e:
+            console.print(f"[yellow]Skipping malformed exploit entry: {e}[/yellow]")
+
+    console.print(f"[green]✅ {len(session.exploit_options)} exploit option(s) loaded[/green]")
 
 
 def _answer_to_result(question: str, ans: Answer) -> ToolResult:

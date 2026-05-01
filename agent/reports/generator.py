@@ -8,8 +8,10 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import parse_xml
 
-ENGAGEMENTS_DIR = Path(__file__).resolve().parents[2] / "engagements"
-REPORTS_DIR     = Path(__file__).resolve().parents[2] / "reports"
+from agent.core.session import ENGAGEMENTS_DIR as _ENG_DIR, REPORTS_DIR as _REP_DIR
+
+ENGAGEMENTS_DIR = Path(_ENG_DIR)
+REPORTS_DIR     = Path(_REP_DIR)
 
 # CVSS baseline estimates by service name
 CVSS_MAP = {
