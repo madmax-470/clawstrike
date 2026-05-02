@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ssl as ssl_module
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -45,21 +46,37 @@ def load_wordlist(path: str) -> list:
     return paths
 
 
+def _build_opener(use_ssl: bool):
+    class NoRedirect(urllib.request.HTTPErrorProcessor):
+        def http_response(self, request, response):
+            return response
+        https_response = http_response
+
+    if use_ssl:
+        ctx = ssl_module.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl_module.CERT_NONE
+        return urllib.request.build_opener(
+            NoRedirect,
+            urllib.request.HTTPSHandler(context=ctx),
+        )
+    return urllib.request.build_opener(NoRedirect)
+
+
 def check_path(args: tuple):
-    base_url, path, timeout = args
+    base_url, path, timeout, use_ssl = args
     url = base_url + path
     try:
-        class NoRedirect(urllib.request.HTTPErrorProcessor):
-            def http_response(self, request, response):
-                return response
-            https_response = http_response
-
-        opener = urllib.request.build_opener(NoRedirect)
+        opener = _build_opener(use_ssl)
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 ClawStrike/0.1",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 ClawStrike/0.1"
+                ),
                 "Accept": "*/*",
+                "Connection": "close",
             },
         )
         response = opener.open(req, timeout=timeout)
@@ -74,6 +91,13 @@ def check_path(args: tuple):
     return None
 
 
+def detect_wildcard(base_url: str, use_ssl: bool, timeout: int) -> bool:
+    """Return True if server responds 200 to a random nonexistent path."""
+    fake = f"/clawstrike_nonexistent_{os.urandom(4).hex()}"
+    result = check_path((base_url, fake, timeout, use_ssl))
+    return result is not None and result[1] == 200
+
+
 def scan(
     target: str,
     port: int = 80,
@@ -81,8 +105,14 @@ def scan(
     wordlist: str = None,
     threads: int = 20,
     timeout: int = 5,
-) -> dict:
-    scheme = "https" if ssl or port == 443 else "http"
+) -> tuple[dict, int]:
+    """
+    Scan target for web paths.
+    Returns (found_dict, total_paths_scanned).
+    found_dict maps path → HTTP status code.
+    """
+    use_ssl = ssl or port in (443, 8443)
+    scheme = "https" if use_ssl else "http"
     base_url = f"{scheme}://{target}:{port}"
 
     wl_path = wordlist or find_wordlist()
@@ -91,13 +121,21 @@ def scan(
             "[red]No wordlist found.[/red]\n"
             "Install: apt install dirb seclists wordlists"
         )
-        return {}
+        return {}, 0
 
     console.print(f"[dim]wordlist: {wl_path}[/dim]")
     paths = load_wordlist(wl_path)
-    console.print(f"[dim]loaded {len(paths)} paths to check[/dim]")
+    total = len(paths)
+    console.print(f"[dim]loaded {total} paths to check[/dim]")
 
-    args = [(base_url, p, timeout) for p in paths]
+    if detect_wildcard(base_url, use_ssl, timeout):
+        console.print(
+            "[yellow]⚠ Wildcard response detected — "
+            "server returns 200 for all paths. "
+            "Results may include false positives.[/yellow]"
+        )
+
+    args = [(base_url, p, timeout, use_ssl) for p in paths]
 
     with Progress(
         SpinnerColumn(),
@@ -105,7 +143,7 @@ def scan(
         transient=True,
     ) as progress:
         task = progress.add_task(
-            f"scanning {len(paths)} paths on {target}...",
+            f"scanning {total} paths on {target}...",
             total=None,
         )
         with ThreadPoolExecutor(max_workers=threads) as pool:
@@ -118,7 +156,7 @@ def scan(
             path, code = result
             found[path] = code
 
-    return found
+    return found, total
 
 
 def classify_status(code: int) -> str:
@@ -136,11 +174,13 @@ def classify_status(code: int) -> str:
     return mapping.get(code, f"status {code}")
 
 
-def format_for_agent(target: str, results: dict) -> str:
-    if not results:
-        return f"No accessible paths found on {target}"
+def format_for_agent(target: str, results: dict, total_scanned: int = 0) -> str:
+    scanned_str = f"Scanned {total_scanned} paths — " if total_scanned else ""
 
-    lines = [f"Found {len(results)} web path(s) on {target}:\n"]
+    if not results:
+        return f"{scanned_str}no accessible paths found on {target}"
+
+    lines = [f"{scanned_str}found {len(results)} result(s) on {target}:\n"]
 
     priority = {200: 0, 401: 1, 403: 2, 301: 3, 302: 4, 405: 5}
     sorted_paths = sorted(

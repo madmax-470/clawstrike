@@ -476,47 +476,37 @@ class PentestIntelligence:
     def _answer_what_web_paths_exist(self, target: str, context: dict) -> Answer:
         attempts = []
         http_target = _ensure_http(target, context.get("port", 80))
+        port = context.get("port", 80)
+        use_ssl = port in (443, 8443) or context.get("ssl", False)
 
-        # Method 1: gobuster
-        self._trying(f"gobuster dir → {http_target}")
-        if _tool_exists("gobuster"):
-            try:
-                from agent.tools.gobuster import scan as gobuster_scan
-                result = gobuster_scan(http_target)
-                if not result.error:
-                    self._ok("gobuster", f"{len(result.found_paths)} paths found")
-                    return Answer("what_web_paths_exist", target, True, "gobuster",
-                                  {"paths": result.found_paths},
-                                  attempts=attempts + [Attempt("gobuster", True)])
-                attempts.append(Attempt("gobuster", False, result.error))
-                self._fail("gobuster", result.error)
-            except Exception as e:
-                attempts.append(Attempt("gobuster", False, str(e)))
-                self._fail("gobuster", str(e))
-        else:
-            self._fail("gobuster", "not installed")
-            attempts.append(Attempt("gobuster", False, "not installed"))
-
-        # Method 2: webscanner (threaded urllib — works without external tools)
-        self._trying(f"webscanner → {target}:{context.get('port', 80)}")
+        # Method 1: webscanner — threaded urllib, no external tool required
+        self._trying(f"webscanner → {target}:{port}")
         try:
-            from agent.tools.webscanner import scan as ws_scan, format_for_agent as ws_fmt
-            port = context.get("port", 80)
-            ssl = port == 443 or context.get("ssl", False)
-            ws_result = ws_scan(target, port=port, ssl=ssl)
-            if ws_result:
-                self._ok("webscanner", f"{len(ws_result)} paths found")
-                return Answer("what_web_paths_exist", target, True, "webscanner",
-                              {"paths": list(ws_result.keys()),
-                               "formatted": ws_fmt(target, ws_result)},
-                              attempts=attempts + [Attempt("webscanner", True)])
-            attempts.append(Attempt("webscanner", False, "no paths found"))
-            self._fail("webscanner", "no paths found")
+            from agent.tools.webscanner import (
+                scan as ws_scan,
+                format_for_agent as ws_fmt,
+                find_wordlist,
+            )
+            wordlist = find_wordlist()
+            if not wordlist:
+                self._fail("webscanner", "no wordlist found — install dirb/seclists")
+                attempts.append(Attempt("webscanner", False, "no wordlist"))
+            else:
+                ws_found, ws_total = ws_scan(target, port=port, ssl=use_ssl)
+                self._ok("webscanner", f"{len(ws_found)} paths found ({ws_total} scanned)")
+                return Answer(
+                    "what_web_paths_exist", target, True, "webscanner",
+                    {
+                        "paths": list(ws_found.keys()),
+                        "formatted": ws_fmt(target, ws_found, ws_total),
+                    },
+                    attempts=attempts + [Attempt("webscanner", True)],
+                )
         except Exception as e:
             attempts.append(Attempt("webscanner", False, str(e)))
             self._fail("webscanner", str(e))
 
-        # Method 3: ffuf (external tool)
+        # Method 2: ffuf (external tool)
         self._trying(f"ffuf → {http_target}")
         if _tool_exists("ffuf"):
             try:
@@ -542,7 +532,7 @@ class PentestIntelligence:
             self._fail("ffuf", "not installed")
             attempts.append(Attempt("ffuf", False, "not installed"))
 
-        # Method 4: dirb
+        # Method 3: dirb
         self._trying(f"dirb {http_target}")
         if _tool_exists("dirb"):
             try:
@@ -562,7 +552,7 @@ class PentestIntelligence:
             self._fail("dirb", "not installed")
             attempts.append(Attempt("dirb", False, "not installed"))
 
-        # Method 5: manual urllib common paths (hardcoded list, no wordlist needed)
+        # Method 4: manual urllib common paths (hardcoded list, no wordlist needed)
         self._trying("manual urllib common paths")
         paths = _manual_path_check(http_target)
         self._ok("manual urllib", f"{len(paths)} paths found")
