@@ -49,6 +49,15 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
 @dataclass
+class LootItem:
+    category: str       # system_info | users | suid | network | sudo | creds | other
+    label: str          # human-readable label shown in report
+    content: str        # raw output
+    timestamp: str      # ISO-format
+    evidence_file: str  # filename inside evidence/post_exploit/
+
+
+@dataclass
 class ExploitOption:
     number: int
     title: str

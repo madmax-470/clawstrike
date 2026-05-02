@@ -24,7 +24,7 @@ from agent.core.router import ModelRouter
 from agent.core.checker import check_tools, install_tool, install_missing
 from agent.core.exploit_runner import exploit_runner
 from agent.core.post_exploit import post_exploiter
-from agent.core.session import EngagementSession
+from agent.core.session import EngagementSession, LootItem
 from agent.core.model_router import ModelRouter as NewModelRouter
 
 load_dotenv()
@@ -900,7 +900,16 @@ def run():
                     sid = int(parts[1]) if len(parts) > 1 else None
                 except ValueError:
                     sid = None
-                post_exploiter.loot(sid)
+                loot_output = post_exploiter.loot(sid)
+                if loot_output and current_session is not None:
+                    import datetime as _dt
+                    current_session.loot.append(LootItem(
+                        category="system_info",
+                        label="Post-Exploitation Loot",
+                        content=loot_output,
+                        timestamp=_dt.datetime.now().isoformat(),
+                        evidence_file="loot.txt",
+                    ))
                 continue
 
             if cmd.lower() == "pivot" or cmd.lower().startswith("pivot "):
@@ -953,7 +962,7 @@ def run():
                     save_dir = Path.home()
                 console.print(f"[dim]Generating report → {save_dir}[/dim]")
                 with console.status(f"[dim]generating report for {target}...[/dim]", spinner="dots"):
-                    result = generate_report(target, output_dir=save_dir)
+                    result = generate_report(target, session=current_session, output_dir=save_dir)
                 if result.startswith("ERROR"):
                     console.print(f"\n[bold red]{result}[/bold red]")
                 else:
