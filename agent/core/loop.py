@@ -1,5 +1,6 @@
 import subprocess
 import threading
+from pathlib import Path
 from dotenv import load_dotenv
 from version import VERSION, BUILD_DATE
 from rich.console import Console
@@ -931,12 +932,32 @@ def run():
 
             if user_input.strip().lower().startswith("report "):
                 target = user_input.strip()[7:].strip()
+                default = Path.home() / "clawstrike_reports"
+                default.mkdir(exist_ok=True)
+                console.print(f"\n[bold]Where should the report be saved?[/bold]")
+                console.print(f"[dim]Press Enter for default: {default}[/dim]")
+                try:
+                    user_path = console.input("[bold red]save to → [/bold red]").strip()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[dim]Cancelled.[/dim]")
+                    continue
+                if not user_path:
+                    save_dir = default
+                else:
+                    save_dir = Path(user_path).expanduser().resolve()
+                try:
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    console.print(f"[red]Cannot create directory: {e}[/red]")
+                    console.print("[dim]Using home directory instead[/dim]")
+                    save_dir = Path.home()
+                console.print(f"[dim]Generating report → {save_dir}[/dim]")
                 with console.status(f"[dim]generating report for {target}...[/dim]", spinner="dots"):
-                    result = generate_report(target)
+                    result = generate_report(target, output_dir=save_dir)
                 if result.startswith("ERROR"):
                     console.print(f"\n[bold red]{result}[/bold red]")
                 else:
-                    console.print(f"\n[bold green]report saved →[/bold green] {result}")
+                    console.print(f"\n[bold green]✅ Report saved:[/bold green] {result}")
                 continue
 
             history.append({

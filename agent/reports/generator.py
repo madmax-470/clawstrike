@@ -251,8 +251,10 @@ def _parse_engagement(md_path: Path) -> dict:
 
 # ── main generator ────────────────────────────────────────────────────────────
 
-def generate_report(target: str) -> str:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+def generate_report(target: str, output_dir: Path = None) -> str:
+    if output_dir is None:
+        output_dir = REPORTS_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     pattern = f"{target.replace('/', '_').replace(':', '_')}_*.md"
     files   = sorted(ENGAGEMENTS_DIR.glob(pattern))
@@ -500,6 +502,6 @@ def generate_report(target: str) -> str:
 
     # ── save ──────────────────────────────────────────────────────────────────
     timestamp   = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    out_path    = REPORTS_DIR / f"{safe_target}_{timestamp}.docx"
+    out_path    = output_dir / f"{safe_target}_{timestamp}.docx"
     doc.save(str(out_path))
     return str(out_path)
