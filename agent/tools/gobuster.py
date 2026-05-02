@@ -9,23 +9,6 @@ from agent.core.subprocess_utils import runner, tool_exists
 
 console = Console()
 
-WORDLIST_PATHS = [
-    "/usr/share/wordlists/dirb/common.txt",
-    "/usr/share/dirb/wordlists/common.txt",
-    "/usr/share/wordlists/dirb/small.txt",
-    "/usr/share/seclists/Discovery/Web-Content/common.txt",
-    "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-small.txt",
-    "/usr/share/seclists/Discovery/Web-Content/big.txt",
-    "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
-    "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
-]
-
-
-def find_wordlist() -> Optional[str]:
-    for path in WORDLIST_PATHS:
-        if Path(path).exists():
-            return path
-    return None
 
 
 def classify_status(code: int) -> str:
@@ -52,7 +35,7 @@ class GobusterResult:
     error: Optional[str] = None
 
 
-def scan(target: str, flags: str = "") -> GobusterResult:
+def scan(target: str, wordlist: str = None, flags: str = "") -> GobusterResult:
     if not tool_exists("gobuster"):
         console.print("[dim yellow]gobuster not found — use webscanner fallback[/dim yellow]")
         return GobusterResult(target=target, error="gobuster not installed")
@@ -60,13 +43,8 @@ def scan(target: str, flags: str = "") -> GobusterResult:
     if not target.startswith("http://") and not target.startswith("https://"):
         target = f"http://{target}"
 
-    wordlist = find_wordlist()
     if not wordlist:
-        console.print(
-            "[red]No wordlist found.[/red]\n"
-            "Install with: apt install dirb seclists wordlists"
-        )
-        return GobusterResult(target=target, error="no wordlist available")
+        return GobusterResult(target=target, error="no wordlist provided")
 
     command = [
         "gobuster", "dir",

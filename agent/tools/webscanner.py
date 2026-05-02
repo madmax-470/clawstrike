@@ -11,23 +11,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
-WORDLIST_PATHS = [
-    "/usr/share/wordlists/dirb/common.txt",
-    "/usr/share/dirb/wordlists/common.txt",
-    "/usr/share/wordlists/dirb/small.txt",
-    "/usr/share/seclists/Discovery/Web-Content/common.txt",
-    "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-small.txt",
-    "/usr/share/seclists/Discovery/Web-Content/big.txt",
-    "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
-    "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
-]
-
-
-def find_wordlist() -> str | None:
-    for path in WORDLIST_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
 
 
 def load_wordlist(path: str) -> list:
@@ -115,18 +98,19 @@ def scan(
     scheme = "https" if use_ssl else "http"
     base_url = f"{scheme}://{target}:{port}"
 
-    wl_path = wordlist or find_wordlist()
-    if not wl_path:
-        console.print(
-            "[red]No wordlist found.[/red]\n"
-            "Install: apt install dirb seclists wordlists"
-        )
+    if not wordlist:
+        console.print("[yellow]⚠ No wordlist — skipping web scan[/yellow]")
         return {}, 0
 
-    console.print(f"[dim]wordlist: {wl_path}[/dim]")
-    paths = load_wordlist(wl_path)
+    if not os.path.exists(wordlist):
+        console.print(f"[red]Wordlist not found: {wordlist}[/red]")
+        console.print("[dim]Check path and try again[/dim]")
+        return {}, 0
+
+    console.print(f"[dim]wordlist: {wordlist}[/dim]")
+    paths = load_wordlist(wordlist)
     total = len(paths)
-    console.print(f"[dim]loaded {total} paths to check[/dim]")
+    console.print(f"[dim]loaded {total} paths[/dim]")
 
     if detect_wildcard(base_url, use_ssl, timeout):
         console.print(

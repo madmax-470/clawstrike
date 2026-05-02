@@ -480,19 +480,15 @@ class PentestIntelligence:
         use_ssl = port in (443, 8443) or context.get("ssl", False)
 
         # Method 1: webscanner — threaded urllib, no external tool required
+        wordlist = context.get("wordlist")
         self._trying(f"webscanner → {target}:{port}")
-        try:
-            from agent.tools.webscanner import (
-                scan as ws_scan,
-                format_for_agent as ws_fmt,
-                find_wordlist,
-            )
-            wordlist = find_wordlist()
-            if not wordlist:
-                self._fail("webscanner", "no wordlist found — install dirb/seclists")
-                attempts.append(Attempt("webscanner", False, "no wordlist"))
-            else:
-                ws_found, ws_total = ws_scan(target, port=port, ssl=use_ssl)
+        if not wordlist:
+            self._fail("webscanner", "no wordlist provided — skipping web scan")
+            attempts.append(Attempt("webscanner", False, "no wordlist"))
+        else:
+            try:
+                from agent.tools.webscanner import scan as ws_scan, format_for_agent as ws_fmt
+                ws_found, ws_total = ws_scan(target, port=port, ssl=use_ssl, wordlist=wordlist)
                 self._ok("webscanner", f"{len(ws_found)} paths found ({ws_total} scanned)")
                 return Answer(
                     "what_web_paths_exist", target, True, "webscanner",
@@ -502,9 +498,9 @@ class PentestIntelligence:
                     },
                     attempts=attempts + [Attempt("webscanner", True)],
                 )
-        except Exception as e:
-            attempts.append(Attempt("webscanner", False, str(e)))
-            self._fail("webscanner", str(e))
+            except Exception as e:
+                attempts.append(Attempt("webscanner", False, str(e)))
+                self._fail("webscanner", str(e))
 
         # Method 2: ffuf (external tool)
         self._trying(f"ffuf → {http_target}")

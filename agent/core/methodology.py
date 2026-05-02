@@ -163,7 +163,7 @@ class Methodology:
     # ------------------------------------------------------------------ #
     # Phase 3 — Targeted Enumeration
     # ------------------------------------------------------------------ #
-    def run_phase3(self, services: dict) -> dict:
+    def run_phase3(self, services: dict, session=None) -> dict:
         """
         Asks service-specific intelligence questions based on what Phase 2 found.
         Returns dict of {question_name: ToolResult}.
@@ -184,7 +184,10 @@ class Methodology:
                           if s in ("http", "https", "http-alt")]
             http_port = int(http_ports[0]) if http_ports else 80
             http_target = _build_http_target(self.target, http_ports)
-            ctx = {"port": http_port}
+            wordlist = session.wordlist if session else None
+            if not wordlist:
+                console.print("[dim]skipping web directory scan — no wordlist provided[/dim]")
+            ctx = {"port": http_port, "wordlist": wordlist}
 
             for question in ("what_web_paths_exist", "what_web_tech", "is_web_vulnerable"):
                 ans = intelligence.answer(question, http_target, ctx)
@@ -480,7 +483,7 @@ class Methodology:
             for p, info in services.items()
         }
 
-        p3_results = self.run_phase3(services)
+        p3_results = self.run_phase3(services, session)
         self.print_phase3_status(p3_results)
 
         self.run_phase4(services, p3_results, session)

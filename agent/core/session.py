@@ -77,6 +77,7 @@ class EngagementSession:
     target: str
     profile: str
     scope: str
+    wordlist: Optional[str] = None               # path to wordlist for web scanning
     open_ports: list = field(default_factory=list)
     services: dict = field(default_factory=dict)    # port → {service, version}
     findings: list = field(default_factory=list)

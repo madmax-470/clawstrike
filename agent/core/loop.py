@@ -656,12 +656,29 @@ def _handle_pentest(cmd: str, scope, router) -> None:
         console.print("[dim]Engagement cancelled.[/dim]")
         return
 
+    console.print("\n[bold]Web scanning wordlist[/bold]")
+    console.print("[dim]Used for directory enumeration on web services[/dim]")
+    console.print("[dim]Common locations:[/dim]")
+    console.print("[dim]  /usr/share/wordlists/dirb/common.txt[/dim]")
+    console.print("[dim]  /usr/share/seclists/Discovery/Web-Content/common.txt[/dim]")
+    console.print("[dim]  /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt[/dim]")
+    try:
+        wordlist_input = console.input(
+            "[bold red]wordlist path[/bold red] [dim](press Enter to skip web scanning)[/dim] → "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        wordlist_input = ""
+    if not wordlist_input:
+        console.print("[yellow]⚠ No wordlist provided — web directory scanning will be skipped[/yellow]")
+        wordlist_input = None
+
     global current_session
     from agent.core.methodology import Methodology
     current_session = EngagementSession(
         target=target,
         profile=profile.name,
         scope=scope_display,
+        wordlist=wordlist_input,
     )
     methodology = Methodology(target=target, profile=profile, router=router)
     result = methodology.run(current_session)
@@ -910,6 +927,22 @@ def run():
                         timestamp=_dt.datetime.now().isoformat(),
                         evidence_file="loot.txt",
                     ))
+                continue
+
+            if cmd.lower().startswith("wordlist"):
+                parts = cmd.split(None, 1)
+                if len(parts) < 2:
+                    wl = current_session.wordlist if current_session else None
+                    console.print(f"[dim]current wordlist: {wl or '(none)'}[/dim]")
+                    console.print("[dim]usage: wordlist /path/to/list.txt[/dim]")
+                else:
+                    new_wl = parts[1].strip()
+                    if not Path(new_wl).exists():
+                        console.print(f"[red]File not found: {new_wl}[/red]")
+                    else:
+                        if current_session is not None:
+                            current_session.wordlist = new_wl
+                        console.print(f"[green]wordlist updated → {new_wl}[/green]")
                 continue
 
             if cmd.lower() == "pivot" or cmd.lower().startswith("pivot "):
