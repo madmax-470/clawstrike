@@ -481,14 +481,19 @@ class PentestIntelligence:
 
         # Method 1: webscanner — threaded urllib, no external tool required
         wordlist = context.get("wordlist")
-        self._trying(f"webscanner → {target}:{port}")
+        import re as _re
+        clean_target = _re.sub(r'^https?://', '', target).split(':')[0]
+        from agent.tools.webscanner import (
+            scan as ws_scan, format_for_agent as ws_fmt, build_base_url as _ws_build_url
+        )
+        display_url = _ws_build_url(clean_target, port)
+        self._trying(f"webscanner → {display_url}")
         if not wordlist:
             self._fail("webscanner", "no wordlist provided — skipping web scan")
             attempts.append(Attempt("webscanner", False, "no wordlist"))
         else:
             try:
-                from agent.tools.webscanner import scan as ws_scan, format_for_agent as ws_fmt
-                ws_found, ws_total = ws_scan(target, port=port, ssl=use_ssl, wordlist=wordlist)
+                ws_found, ws_total = ws_scan(clean_target, port=port, ssl=use_ssl, wordlist=wordlist)
                 self._ok("webscanner", f"{len(ws_found)} paths found ({ws_total} scanned)")
                 return Answer(
                     "what_web_paths_exist", target, True, "webscanner",

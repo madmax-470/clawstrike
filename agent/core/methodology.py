@@ -183,14 +183,13 @@ class Methodology:
             http_ports = [p for p, s in port_services.items()
                           if s in ("http", "https", "http-alt")]
             http_port = int(http_ports[0]) if http_ports else 80
-            http_target = _build_http_target(self.target, http_ports)
             wordlist = session.wordlist if session else None
             if not wordlist:
                 console.print("[dim]skipping web directory scan — no wordlist provided[/dim]")
             ctx = {"port": http_port, "wordlist": wordlist}
 
             for question in ("what_web_paths_exist", "what_web_tech", "is_web_vulnerable"):
-                ans = intelligence.answer(question, http_target, ctx)
+                ans = intelligence.answer(question, self.target, ctx)
                 results[question] = _answer_to_result(question, ans)
 
         if has_ftp:

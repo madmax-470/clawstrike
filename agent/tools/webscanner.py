@@ -12,6 +12,29 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 console = Console()
 
 
+def build_base_url(target: str, port: int) -> str:
+    """
+    Build correct base URL.
+    - Port 80  → http://target      (no port suffix)
+    - Port 443 → https://target     (no port suffix)
+    - Any other port → http://target:port
+    Strips any existing scheme or :port from target before building.
+    """
+    for prefix in ("https://", "http://"):
+        if target.startswith(prefix):
+            target = target[len(prefix):]
+            break
+    clean_target = target.split(':')[0]
+
+    if port == 80:
+        return f"http://{clean_target}"
+    elif port == 443:
+        return f"https://{clean_target}"
+    elif port in (8443, 8444):
+        return f"https://{clean_target}:{port}"
+    else:
+        return f"http://{clean_target}:{port}"
+
 
 def load_wordlist(path: str) -> list:
     paths = []
@@ -94,9 +117,8 @@ def scan(
     Returns (found_dict, total_paths_scanned).
     found_dict maps path → HTTP status code.
     """
-    use_ssl = ssl or port in (443, 8443)
-    scheme = "https" if use_ssl else "http"
-    base_url = f"{scheme}://{target}:{port}"
+    use_ssl = ssl or port in (443, 8443, 8444)
+    base_url = build_base_url(target, port)
 
     if not wordlist:
         console.print("[yellow]⚠ No wordlist — skipping web scan[/yellow]")
