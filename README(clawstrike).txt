@@ -1,5 +1,5 @@
 ═══════════════════════════════════════════════════════════════════════════════
-CLAWSTRIKE — TRAINING DATA PIPELINE SCRIPTS
+CLAWSTRIKE, TRAINING DATA PIPELINE SCRIPTS
 ═══════════════════════════════════════════════════════════════════════════════
 
 This folder contains all scripts for building ClawStrike's training dataset.
@@ -52,7 +52,7 @@ SCRIPT 1: writeup_fetcher.py
 
 PURPOSE:
   Fetches pentesting writeups from any URL and formats them into raw data
-  files organized by training layer. Designed for delegation — juniors run
+  files organized by training layer. Designed for delegation, juniors run
   this, leads review the output.
 
 USAGE:
@@ -111,7 +111,7 @@ PURPOSE:
   Validates raw writeup files against training data quality standards.
   Gives a PASS/FAIL verdict with specific issues flagged. Run this BEFORE
   feeding files into writeup_extractor.py to catch bad data early.
-  No API key needed — runs entirely offline using pattern matching.
+  No API key needed, runs entirely offline using pattern matching.
 
 USAGE:
   python scripts/quality_check.py <file_or_directory> [--layer N] [--strict]
@@ -130,7 +130,7 @@ EXAMPLES:
   # Check all files in a directory
   python scripts/quality_check.py raw/htb/ --layer 1
 
-  # Strict mode — warnings become failures
+  # Strict mode, warnings become failures
   python scripts/quality_check.py raw/htb/ --layer 1 --strict
 
   # Check Layer 3 (failed paths) data
@@ -139,7 +139,7 @@ EXAMPLES:
   # Check Layer 5 (post-exploitation) data
   python scripts/quality_check.py raw/post_exploit/ --layer 5
 
-WHAT IT CHECKS (Layer 1 — Recon Decision Trees):
+WHAT IT CHECKS (Layer 1, Recon Decision Trees):
   REQUIRED (must pass):
     ✓ Raw scan output present (nmap results with port/service data)
     ✓ Service versions included (version numbers for exploit reasoning)
@@ -170,12 +170,12 @@ OUTPUT:
   Prints PASS/FAIL verdict per file with specific issues flagged.
   When checking a directory, prints a summary at the end.
 
-  ✅ PASS          — file meets all quality standards
-  ⚠️  PASS (warnings) — meets required standards but missing nice-to-haves
-  ❌ FAIL          — file does not meet required standards, needs fixing
+  ✅ PASS         , file meets all quality standards
+  ⚠️  PASS (warnings), meets required standards but missing nice-to-haves
+  ❌ FAIL         , file does not meet required standards, needs fixing
 
 NOTES:
-  - No API key needed — runs entirely offline
+  - No API key needed, runs entirely offline
   - Run this BEFORE writeup_extractor.py to save API tokens on bad files
   - Use --strict for final dataset validation
   - Juniors can run this to self-check their fetcher output before handoff
@@ -188,7 +188,7 @@ SCRIPT 3: writeup_extractor.py
 PURPOSE:
   Takes raw writeup text files and uses Claude API to extract structured
   training data. Presents the extraction for human review before saving.
-  This is the quality gate — nothing enters the dataset without approval.
+  This is the quality gate, nothing enters the dataset without approval.
 
 USAGE:
   python scripts/writeup_extractor.py <path>
@@ -207,9 +207,9 @@ EXAMPLES:
 
 REVIEW OPTIONS:
   When the extraction is shown, you choose:
-    [a] approve  — generates training examples and saves to processed/
-    [e] edit     — saves JSON for manual editing, prints edit instructions
-    [s] skip     — discards this extraction, moves to next file
+    [a] approve , generates training examples and saves to processed/
+    [e] edit    , saves JSON for manual editing, prints edit instructions
+    [s] skip    , discards this extraction, moves to next file
 
 OUTPUT:
   Approved extractions → ~/clawstrike-data/processed/layer1_recon/<boxname>.jsonl
@@ -222,7 +222,7 @@ NOTES:
       1. Initial scan → first decision
       2. Pivot point (if present)
       3. Failed attempt recovery (if present)
-  - Always review before approving — Claude can misinterpret writeups
+  - Always review before approving, Claude can misinterpret writeups
   - If you choose [e]dit, modify the JSON file then run load_edited.py
 
 
@@ -349,7 +349,7 @@ Step 6: Hand over the PASSED output files to your lead for review
         Files are in ~/clawstrike-data/raw/htb/ (or the layer-specific folder)
 
 DO NOT:
-  - Run writeup_extractor.py (that's the lead's job — quality gate)
+  - Run writeup_extractor.py (that's the lead's job, quality gate)
   - Modify any files in processed/ or training/
   - Change the --layer flag without checking with your lead
   - Run the same links file twice (check metadata/fetch_tracker.jsonl)
@@ -415,7 +415,7 @@ TROUBLESHOOTING
 
 Script hangs or takes too long:
   → Check your internet connection
-  → Some writeups are very long — the AI extraction takes 10-30 seconds
+  → Some writeups are very long, the AI extraction takes 10-30 seconds
   → Ctrl+C to cancel, the script saves progress
 
 ═══════════════════════════════════════════════════════════════════════════════
