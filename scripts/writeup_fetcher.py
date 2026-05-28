@@ -1,26 +1,21 @@
 """
-ClawStrike — Writeup Fetcher
-=============================
+ClawStrike — Writeup Fetcher (v3)
+==================================
 Fetches pentesting writeups from any URL, extracts relevant content,
 and formats it into raw data files organized by training layer.
+
+Fixes from v2:
+- Output directory based on detected platform (htb/vulnhub/thm), not layer
+- AI extraction pulls only layer-relevant content
+- Proper markdown handling for GitHub raw URLs
 
 Usage:
   python scripts/writeup_fetcher.py <links_file> [--layer N]
 
-  links_file  = text file with one URL per line
-  --layer N   = which layer to format for (1-7, default: 1)
-
 Examples:
   python scripts/writeup_fetcher.py links/htb_easy.txt --layer 1
-  python scripts/writeup_fetcher.py links/failures.txt --layer 3
-  python scripts/writeup_fetcher.py links/reports.txt --layer 6
-
-Output:
-  Raw .txt files saved to ~/clawstrike-data/raw/<source>/<boxname>.txt
-  Ready for review, then feeding into writeup_extractor.py
-
-Designed for delegation — give your juniors the links file
-and this script. They run it, you review the output.
+  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 1
+  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 3
 """
 
 import argparse
@@ -47,8 +42,6 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
-# ── Directories ─────────────────────────────────────────────────────────────
-
 RAW_DIR = Path.home() / "clawstrike-data" / "raw"
 LINKS_DIR = Path.home() / "clawstrike-data" / "links"
 META_DIR = Path.home() / "clawstrike-data" / "metadata"
@@ -56,12 +49,9 @@ META_DIR = Path.home() / "clawstrike-data" / "metadata"
 for d in [RAW_DIR, LINKS_DIR, META_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ── Layer Definitions ───────────────────────────────────────────────────────
-
 LAYER_CONFIG = {
     1: {
         "name": "Recon Decision Trees",
-        "output_subdir": "htb",
         "focus": "reconnaissance and enumeration",
         "extract_prompt": """Extract ONLY the reconnaissance and enumeration phase from this writeup.
 
@@ -84,7 +74,6 @@ Write it as a raw narrative walkthrough showing actual decision-making with real
     },
     2: {
         "name": "Tool Output Parsing",
-        "output_subdir": "tool_outputs",
         "focus": "tool outputs and their interpretation",
         "extract_prompt": """Extract ALL raw tool outputs from this writeup and how the author interpreted them.
 
@@ -107,7 +96,6 @@ DO NOT include exploitation or privilege escalation steps.""",
     },
     3: {
         "name": "Failed Paths + Pivots",
-        "output_subdir": "failures",
         "focus": "failed attempts and how the author recovered",
         "extract_prompt": """Extract ONLY the failed attempts, dead ends, and pivot decisions from this writeup.
 
@@ -119,17 +107,12 @@ Include:
 5. Any rabbit holes they went down before finding the right path
 6. Times they had to change strategy entirely
 
-Focus on the FAILURES and PIVOTS, not the successful path. I want to see:
-- "I tried X but it didn't work because Y"
-- "This looked promising but turned out to be a dead end"
-- "The exploit failed so I had to find another way"
-
+Focus on the FAILURES and PIVOTS, not the successful path.
 Include the actual commands and error outputs when available.
 DO NOT include steps that worked on the first try unless they came after a failure.""",
     },
     4: {
         "name": "Exploit Ranking",
-        "output_subdir": "exploit_ranking",
         "focus": "vulnerability assessment and exploit selection",
         "extract_prompt": """Extract the vulnerability assessment and exploit selection reasoning from this writeup.
 
@@ -149,19 +132,18 @@ Focus on the DECISION of what to exploit and WHY.""",
     },
     5: {
         "name": "Post-Exploitation Reasoning",
-        "output_subdir": "post_exploit",
         "focus": "post-exploitation and privilege escalation",
         "extract_prompt": """Extract ONLY the post-exploitation and privilege escalation phase from this writeup.
 
 Include:
 1. What access level they had after initial exploitation
-2. First commands run after getting a shell (whoami, id, uname, etc.)
+2. First commands run after getting a shell
 3. System enumeration steps (LinPEAS, WinPEAS, manual checks)
 4. How they identified the privilege escalation vector
 5. What they checked and in what order
 6. Failed privesc attempts before the successful one
-7. Credential harvesting (files found, hashes cracked, keys discovered)
-8. Any lateral movement or network reconnaissance from the compromised host
+7. Credential harvesting
+8. Any lateral movement or network reconnaissance
 
 Focus on the REASONING — why they checked certain things first,
 how they prioritized privesc vectors, what they ignored and why.
@@ -171,7 +153,6 @@ Start from the point where they have a shell and are escalating.""",
     },
     6: {
         "name": "Reporting Intelligence",
-        "output_subdir": "reporting",
         "focus": "vulnerability findings and report writing",
         "extract_prompt": """Extract all vulnerability findings from this writeup in a format suitable for professional reporting.
 
@@ -182,18 +163,11 @@ For each vulnerability found, extract:
 4. The evidence chain (commands + outputs proving the vulnerability)
 5. Any CVE or advisory references
 
-Also extract:
-- The overall severity of the engagement
-- How many steps were needed for full compromise
-- Whether credentials were involved
-- The attack chain summary
-
 Format each finding separately with clear evidence.
 DO NOT editorialize — just extract the raw findings with evidence.""",
     },
     7: {
         "name": "Ethics + Scope Enforcement",
-        "output_subdir": "ethics",
         "focus": "scope boundaries and ethical decisions",
         "extract_prompt": """Extract any mentions of scope, authorization, or ethical boundaries from this writeup.
 
@@ -203,26 +177,39 @@ Include:
 3. Decisions to NOT exploit something (and reasoning)
 4. Any discussion of responsible disclosure
 5. References to rules of engagement
-6. Moments where the author chose a less destructive approach
-7. Any mention of cleaning up after exploitation
 
-Also note:
-- The target scope (what was authorized)
-- Any adjacent systems discovered but not exploited
-- Ethical considerations mentioned
-
-If the writeup doesn't explicitly discuss ethics/scope, note that.
-Many writeups assume scope implicitly — capture any implicit boundaries too.""",
+If the writeup doesn't explicitly discuss ethics/scope, note that.""",
     },
 }
 
 
-# ── Source Detection ────────────────────────────────────────────────────────
+# ── Platform Detection ──────────────────────────────────────────────────────
+
+def detect_platform(url: str, page_text: str = "") -> str:
+    """Detect platform from URL and content. Returns folder name."""
+    url_lower = url.lower()
+    text_lower = page_text[:2000].lower() if page_text else ""
+
+    if "htb" in url_lower or "hackthebox" in url_lower:
+        return "htb"
+    if "tryhackme" in url_lower or "thm" in url_lower:
+        return "thm"
+    if "vulnhub" in url_lower:
+        return "vulnhub"
+
+    # Check content for platform mentions
+    if "hack the box" in text_lower or "hackthebox" in text_lower or "htb" in text_lower:
+        return "htb"
+    if "tryhackme" in text_lower:
+        return "thm"
+    if "vulnhub" in text_lower:
+        return "vulnhub"
+
+    return "other"
+
 
 def detect_source(url: str) -> str:
-    """Detect the writeup source from the URL."""
     domain = urlparse(url).netloc.lower()
-
     source_map = {
         "0xdf.gitlab.io": "0xdf",
         "rana-khalil.gitbook.io": "rana-khalil",
@@ -231,64 +218,83 @@ def detect_source(url: str) -> str:
         "infosecwriteups.com": "infosecwriteups",
         "hacktricks.xyz": "hacktricks",
         "book.hacktricks.xyz": "hacktricks",
+        "raw.githubusercontent.com": "github",
+        "github.com": "github",
     }
-
     for key, source in source_map.items():
         if key in domain:
             return source
-
-    # Fallback: use domain name
     return domain.replace(".", "_")
 
 
 def extract_box_name(url: str, page_text: str, page_title: str) -> str:
-    """Try to extract the box/machine name from URL, title, or content."""
+    path = urlparse(url).path
 
-    # Try URL path
-    path = urlparse(url).path.lower()
-
-    # 0xdf pattern: /2020/04/07/htb-lame.html
-    htb_match = re.search(r"htb-(\w+)", path)
+    # 0xdf pattern: htb-lame.html
+    htb_match = re.search(r"htb-(\w+)", path, re.IGNORECASE)
     if htb_match:
         return htb_match.group(1).capitalize()
 
-    # Try page title
+    # VulnHub pattern: Vulnhub-Jigsaw.md
+    vulnhub_match = re.search(r"[Vv]ulnhub[_-](\w+)\.md", path)
+    if vulnhub_match:
+        return vulnhub_match.group(1).capitalize()
+
+    # Date-prefixed GitHub files: 2019-07-02-Something-Name.md
+    date_match = re.search(r"\d{4}-\d{2}-\d{2}-(.+?)\.md", path)
+    if date_match:
+        raw_name = date_match.group(1)
+        cleaned = re.sub(r"^(vulnhub|htb|hackthebox|tryhackme)[_-]", "", raw_name, flags=re.IGNORECASE)
+        parts = cleaned.split("-")
+        name = parts[-1] if len(parts) > 1 else parts[0]
+        return name.replace("_", " ").strip().capitalize()
+
+    # Title patterns
     if page_title:
-        # Common patterns: "HTB: Lame", "HackTheBox - Lame", "Lame - HTB"
         title_patterns = [
-            r"HTB:\s*(\w+)",
-            r"HackTheBox\s*[-–]\s*(\w+)",
-            r"(\w+)\s*[-–]\s*HTB",
-            r"(\w+)\s*[-–]\s*HackTheBox",
-            r"(\w+)\s*[-–]\s*Hack\s*The\s*Box",
-            r"TryHackMe\s*[-–]\s*(\w+)",
-            r"(\w+)\s*[-–]\s*TryHackMe",
-            r"VulnHub\s*[-–]\s*(\w+)",
+            r"HTB:\s*(\w+)", r"HackTheBox\s*[-–]\s*(\w+)",
+            r"(\w+)\s*[-–]\s*HTB", r"VulnHub\s*[-–]\s*(\w+)",
+            r"Vulnhub\s*[-–]\s*(\w+)", r"(\w+)\s+writeup",
+            r"(\w+)\s*[-–]\s*writeup",
         ]
         for pattern in title_patterns:
             match = re.search(pattern, page_title, re.IGNORECASE)
             if match:
-                return match.group(1).capitalize()
+                return match.group(1).strip().capitalize()
 
-    # Fallback: use last meaningful URL segment
-    segments = [s for s in path.strip("/").split("/") if s and s != "index.html"]
+    # Content-based
+    if page_text:
+        for pattern in [r"[Mm]achine[:\s]+(\w+)", r"[Bb]ox[:\s]+(\w+)"]:
+            match = re.search(pattern, page_text[:1000])
+            if match:
+                name = match.group(1)
+                if name.lower() not in ("the", "this", "a", "an", "is", "setup", "name"):
+                    return name.capitalize()
+
+    # Final fallback
+    segments = [s for s in path.strip("/").split("/") if s]
     if segments:
-        name = segments[-1].replace(".html", "").replace(".htm", "").replace("-", "_")
-        return name.capitalize()
+        name = segments[-1]
+        name = re.sub(r"\.(html?|md|txt)$", "", name)
+        name = re.sub(r"^\d{4}-\d{2}-\d{2}-?", "", name)
+        name = name.replace("-", "_").strip("_")
+        if name:
+            return name.capitalize()
 
     return "unknown"
 
 
-# ── Page Fetching ───────────────────────────────────────────────────────────
+def is_raw_text_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if "raw.githubusercontent.com" in parsed.netloc:
+        return True
+    if parsed.path.lower().endswith((".md", ".txt", ".rst")):
+        return True
+    return False
+
 
 def fetch_page(url: str) -> tuple[str, str, str]:
-    """
-    Fetch a URL and return (raw_text, page_title, error).
-    Returns cleaned text content suitable for AI processing.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; ClawStrike-DataPipeline/1.0)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ClawStrike-DataPipeline/1.0)"}
 
     try:
         resp = requests.get(url, headers=headers, timeout=30)
@@ -296,33 +302,32 @@ def fetch_page(url: str) -> tuple[str, str, str]:
     except requests.exceptions.RequestException as e:
         return "", "", f"Failed to fetch {url}: {e}"
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # Raw text/markdown — return as-is
+    if is_raw_text_url(url):
+        raw_text = resp.text
+        title = ""
+        title_match = re.search(r"^#\s+(.+)$", raw_text, re.MULTILINE)
+        if title_match:
+            title = title_match.group(1).strip()
+        else:
+            fm_match = re.search(r"title:\s*(.+)", raw_text)
+            if fm_match:
+                title = fm_match.group(1).strip()
+        raw_text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", raw_text, flags=re.DOTALL)
+        return raw_text, title, ""
 
-    # Get title
+    # HTML page
+    soup = BeautifulSoup(resp.text, "html.parser")
     title = soup.title.string.strip() if soup.title and soup.title.string else ""
 
-    # Remove unwanted elements
     for tag in soup.find_all(["script", "style", "nav", "footer", "header",
                                "aside", "iframe", "noscript"]):
         tag.decompose()
 
-    # Try to find main content area
     content = None
-
-    # Common content selectors
-    selectors = [
-        "article",
-        ".post-content",
-        ".entry-content",
-        ".article-content",
-        ".content",
-        ".markdown-body",
-        "main",
-        "#content",
-        ".post",
-    ]
-
-    for selector in selectors:
+    for selector in ["article", ".post-content", ".entry-content",
+                     ".article-content", ".content", ".markdown-body",
+                     "main", "#content", ".post"]:
         found = soup.select_one(selector)
         if found:
             content = found
@@ -331,7 +336,6 @@ def fetch_page(url: str) -> tuple[str, str, str]:
     if not content:
         content = soup.body if soup.body else soup
 
-    # Extract text preserving code blocks
     text_parts = []
     for element in content.descendants:
         if element.name in ("pre", "code"):
@@ -343,32 +347,21 @@ def fetch_page(url: str) -> tuple[str, str, str]:
         elif element.name == "li":
             text_parts.append(f"- {element.get_text().strip()}\n")
 
-    # If descendants approach got too little, fall back to get_text
     raw_text = "".join(text_parts)
     if len(raw_text.strip()) < 200:
         raw_text = content.get_text(separator="\n", strip=True)
 
-    # Clean up excessive whitespace
     raw_text = re.sub(r"\n{4,}", "\n\n\n", raw_text)
-
     return raw_text, title, ""
 
 
-# ── AI-Assisted Extraction ─────────────────────────────────────────────────
-
 def ai_extract(raw_text: str, layer: int, box_name: str, source: str) -> str:
-    """
-    Use Claude API to extract layer-specific content from raw writeup text.
-    Falls back to raw text if API is unavailable.
-    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
     if not HAS_ANTHROPIC or not api_key:
-        print("  [!] No Anthropic API key — saving raw text (manual extraction needed)")
+        print("  [!] No Anthropic API key — saving raw text")
         return raw_text
 
     layer_cfg = LAYER_CONFIG[layer]
-
     client = Anthropic(api_key=api_key)
 
     prompt = f"""You are extracting training data from a penetration testing writeup.
@@ -395,25 +388,40 @@ Layer: {layer} — {layer_cfg['name']}
         return raw_text
 
 
-# ── File Output ─────────────────────────────────────────────────────────────
-
 def save_raw_file(content: str, box_name: str, source: str,
-                  layer: int, url: str) -> Path:
-    """Save extracted content as a raw data file."""
+                  platform: str, layer: int, url: str) -> Path:
+    """Save to platform-specific directory. Never overwrites."""
 
     layer_cfg = LAYER_CONFIG[layer]
-    subdir = RAW_DIR / layer_cfg["output_subdir"]
+
+    # Save to platform directory (htb/, vulnhub/, thm/, other/)
+    subdir = RAW_DIR / platform
     subdir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{box_name.lower().replace(' ', '_')}.txt"
-    filepath = subdir / filename
+    # Unique filename: source_boxname.txt
+    safe_source = re.sub(r"[^a-z0-9]", "_", source.lower())
+    safe_name = re.sub(r"[^a-z0-9]", "_", box_name.lower())
+    base_filename = f"{safe_source}_{safe_name}"
 
-    # Build header
+    filename = f"{base_filename}.txt"
+    filepath = subdir / filename
+    counter = 2
+    while filepath.exists():
+        filename = f"{base_filename}_{counter}.txt"
+        filepath = subdir / filename
+        counter += 1
+
+    platform_display = {
+        "htb": "HTB", "vulnhub": "VulnHub",
+        "thm": "TryHackMe", "other": "Other"
+    }.get(platform, platform.upper())
+
     header = f"""{'=' * 75}
-HTB: {box_name.upper()} — {layer_cfg['name'].upper()} (Layer {layer})
+{platform_display}: {box_name.upper()} — {layer_cfg['name'].upper()} (Layer {layer})
 {'=' * 75}
 
 Box: {box_name}
+Platform: {platform_display}
 Source: {source}
 URL: {url}
 Layer: {layer} — {layer_cfg['name']}
@@ -425,18 +433,17 @@ Extracted: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
     with open(filepath, "w") as f:
         f.write(header + content)
-
     return filepath
 
 
 def log_metadata(box_name: str, source: str, url: str,
-                 layer: int, filepath: Path, status: str):
-    """Log extraction metadata for tracking."""
+                 platform: str, layer: int, filepath: Path, status: str):
     tracker = META_DIR / "fetch_tracker.jsonl"
     entry = {
         "box_name": box_name,
         "source": source,
         "url": url,
+        "platform": platform,
         "layer": layer,
         "output_file": str(filepath),
         "status": status,
@@ -446,10 +453,7 @@ def log_metadata(box_name: str, source: str, url: str,
         f.write(json.dumps(entry) + "\n")
 
 
-# ── Main Processing ────────────────────────────────────────────────────────
-
 def process_url(url: str, layer: int, use_ai: bool = True) -> bool:
-    """Process a single writeup URL."""
     url = url.strip()
     if not url or url.startswith("#"):
         return False
@@ -457,42 +461,41 @@ def process_url(url: str, layer: int, use_ai: bool = True) -> bool:
     print(f"\n{'─' * 60}")
     print(f"  URL: {url}")
 
-    # Fetch page
     raw_text, title, error = fetch_page(url)
     if error:
         print(f"  ERROR: {error}")
-        log_metadata("unknown", "unknown", url, layer, Path(""), f"FETCH_ERROR: {error}")
+        log_metadata("unknown", "unknown", url, "unknown", layer, Path(""), f"FETCH_ERROR: {error}")
         return False
 
-    # Detect source and box name
     source = detect_source(url)
     box_name = extract_box_name(url, raw_text, title)
+    platform = detect_platform(url, raw_text)
 
     print(f"  Box: {box_name}")
+    print(f"  Platform: {platform}")
     print(f"  Source: {source}")
     print(f"  Layer: {layer} — {LAYER_CONFIG[layer]['name']}")
     print(f"  Content: {len(raw_text.split())} words")
+    print(f"  Type: {'Raw markdown' if is_raw_text_url(url) else 'HTML page'}")
+    print(f"  Saving to: raw/{platform}/")
 
     if len(raw_text.split()) < 100:
         print(f"  WARNING: Very short content — may not extract well")
 
-    # Extract layer-specific content
     if use_ai:
         print(f"  Extracting {LAYER_CONFIG[layer]['focus']}...")
         content = ai_extract(raw_text, layer, box_name, source)
     else:
         content = raw_text
 
-    # Save
-    filepath = save_raw_file(content, box_name, source, layer, url)
-    log_metadata(box_name, source, url, layer, filepath, "OK")
+    filepath = save_raw_file(content, box_name, source, platform, layer, url)
+    log_metadata(box_name, source, url, platform, layer, filepath, "OK")
 
     print(f"  ✓ Saved → {filepath}")
     return True
 
 
 def process_links_file(links_file: str, layer: int, use_ai: bool = True):
-    """Process all URLs in a links file."""
     path = Path(links_file)
     if not path.exists():
         print(f"ERROR: Links file not found: {links_file}")
@@ -507,10 +510,11 @@ def process_links_file(links_file: str, layer: int, use_ai: bool = True):
 
     layer_cfg = LAYER_CONFIG[layer]
     print(f"\n{'═' * 60}")
-    print(f"  ClawStrike Writeup Fetcher")
+    print(f"  ClawStrike Writeup Fetcher v3")
     print(f"  Layer {layer}: {layer_cfg['name']}")
     print(f"  URLs to process: {len(urls)}")
     print(f"  AI extraction: {'enabled' if use_ai else 'disabled'}")
+    print(f"  Output: auto-sorted by platform (htb/vulnhub/thm/other)")
     print(f"{'═' * 60}")
 
     success = 0
@@ -527,53 +531,37 @@ def process_links_file(links_file: str, layer: int, use_ai: bool = True):
             print(f"  UNEXPECTED ERROR: {e}")
             failed += 1
 
-        # Rate limit — be polite to servers
         if i < len(urls):
             time.sleep(2)
 
     print(f"\n{'═' * 60}")
     print(f"  Done! {success} succeeded, {failed} failed")
-    print(f"  Raw files saved to: {RAW_DIR / layer_cfg['output_subdir']}")
-    print(f"  ")
-    print(f"  Next step: review the files, then run:")
-    print(f"  python scripts/writeup_extractor.py {RAW_DIR / layer_cfg['output_subdir']}/")
+    print(f"  Files auto-sorted into: raw/htb/, raw/vulnhub/, raw/thm/, raw/other/")
+    print(f"")
+    print(f"  Next steps:")
+    print(f"  1. Quality check:  python scripts/quality_check.py raw/vulnhub/ --layer {layer}")
+    print(f"  2. Extract:        python scripts/writeup_extractor.py raw/vulnhub/")
     print(f"{'═' * 60}")
 
 
-# ── CLI ─────────────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
-        description="ClawStrike Writeup Fetcher — fetch and format training data from writeup URLs",
+        description="ClawStrike Writeup Fetcher v3",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Fetch recon data (Layer 1) from a list of HTB writeup URLs
   python scripts/writeup_fetcher.py links/htb_boxes.txt --layer 1
-
-  # Fetch failure/pivot data (Layer 3)
-  python scripts/writeup_fetcher.py links/htb_boxes.txt --layer 3
-
-  # Fetch without AI extraction (just raw page content)
-  python scripts/writeup_fetcher.py links/htb_boxes.txt --layer 1 --no-ai
-
-  # Quick single URL test
-  echo "https://0xdf.gitlab.io/2020/04/07/htb-lame.html" > /tmp/test.txt
-  python scripts/writeup_fetcher.py /tmp/test.txt --layer 1
-
-Workflow for juniors:
-  1. Create a text file with one writeup URL per line
-  2. Run this script with the appropriate --layer flag
-  3. Hand the output files to the lead for review
-  4. Lead runs writeup_extractor.py on approved files
+  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 1
+  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 3
+  python scripts/writeup_fetcher.py links/mixed.txt --layer 1  (auto-sorts by platform)
 """,
     )
 
-    parser.add_argument("links_file", help="Text file containing one URL per line")
+    parser.add_argument("links_file", help="Text file with one URL per line")
     parser.add_argument("--layer", type=int, default=1, choices=range(1, 8),
                         help="Training data layer (1-7, default: 1)")
     parser.add_argument("--no-ai", action="store_true",
-                        help="Skip AI extraction — save raw page text only")
+                        help="Skip AI extraction — save raw content only")
 
     args = parser.parse_args()
 
