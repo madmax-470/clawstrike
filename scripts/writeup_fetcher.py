@@ -1,21 +1,17 @@
 """
-ClawStrike — Writeup Fetcher (v3)
+ClawStrike — Writeup Fetcher (v4)
 ==================================
 Fetches pentesting writeups from any URL, extracts relevant content,
-and formats it into raw data files organized by training layer.
+and saves to platform/layer organized directories.
 
-Fixes from v2:
-- Output directory based on detected platform (htb/vulnhub/thm), not layer
-- AI extraction pulls only layer-relevant content
-- Proper markdown handling for GitHub raw URLs
+Output structure:
+  raw/{platform}/layer{N}/{boxname}.txt
+  e.g. raw/vulnhub/layer1/jigsaw.txt
+       raw/htb/layer2/lame_nmap.txt
+       raw/vulnhub/layer3/dc6.txt
 
 Usage:
   python scripts/writeup_fetcher.py <links_file> [--layer N]
-
-Examples:
-  python scripts/writeup_fetcher.py links/htb_easy.txt --layer 1
-  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 1
-  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 3
 """
 
 import argparse
@@ -43,11 +39,20 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 RAW_DIR = Path.home() / "clawstrike-data" / "raw"
-LINKS_DIR = Path.home() / "clawstrike-data" / "links"
 META_DIR = Path.home() / "clawstrike-data" / "metadata"
 
-for d in [RAW_DIR, LINKS_DIR, META_DIR]:
+for d in [RAW_DIR, META_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+LAYER_NAMES = {
+    1: "layer1",
+    2: "layer2",
+    3: "layer3",
+    4: "layer4",
+    5: "layer5",
+    6: "layer6",
+    7: "layer7",
+}
 
 LAYER_CONFIG = {
     1: {
@@ -183,10 +188,7 @@ If the writeup doesn't explicitly discuss ethics/scope, note that.""",
 }
 
 
-# ── Platform Detection ──────────────────────────────────────────────────────
-
 def detect_platform(url: str, page_text: str = "") -> str:
-    """Detect platform from URL and content. Returns folder name."""
     url_lower = url.lower()
     text_lower = page_text[:2000].lower() if page_text else ""
 
@@ -196,15 +198,12 @@ def detect_platform(url: str, page_text: str = "") -> str:
         return "thm"
     if "vulnhub" in url_lower:
         return "vulnhub"
-
-    # Check content for platform mentions
-    if "hack the box" in text_lower or "hackthebox" in text_lower or "htb" in text_lower:
+    if "hack the box" in text_lower or "hackthebox" in text_lower:
         return "htb"
     if "tryhackme" in text_lower:
         return "thm"
     if "vulnhub" in text_lower:
         return "vulnhub"
-
     return "other"
 
 
@@ -230,17 +229,14 @@ def detect_source(url: str) -> str:
 def extract_box_name(url: str, page_text: str, page_title: str) -> str:
     path = urlparse(url).path
 
-    # 0xdf pattern: htb-lame.html
     htb_match = re.search(r"htb-(\w+)", path, re.IGNORECASE)
     if htb_match:
         return htb_match.group(1).capitalize()
 
-    # VulnHub pattern: Vulnhub-Jigsaw.md
     vulnhub_match = re.search(r"[Vv]ulnhub[_-](\w+)\.md", path)
     if vulnhub_match:
         return vulnhub_match.group(1).capitalize()
 
-    # Date-prefixed GitHub files: 2019-07-02-Something-Name.md
     date_match = re.search(r"\d{4}-\d{2}-\d{2}-(.+?)\.md", path)
     if date_match:
         raw_name = date_match.group(1)
@@ -249,20 +245,13 @@ def extract_box_name(url: str, page_text: str, page_title: str) -> str:
         name = parts[-1] if len(parts) > 1 else parts[0]
         return name.replace("_", " ").strip().capitalize()
 
-    # Title patterns
     if page_title:
-        title_patterns = [
-            r"HTB:\s*(\w+)", r"HackTheBox\s*[-–]\s*(\w+)",
-            r"(\w+)\s*[-–]\s*HTB", r"VulnHub\s*[-–]\s*(\w+)",
-            r"Vulnhub\s*[-–]\s*(\w+)", r"(\w+)\s+writeup",
-            r"(\w+)\s*[-–]\s*writeup",
-        ]
-        for pattern in title_patterns:
+        for pattern in [r"HTB:\s*(\w+)", r"VulnHub\s*[-–]\s*(\w+)",
+                        r"Vulnhub\s*[-–]\s*(\w+)", r"(\w+)\s+writeup"]:
             match = re.search(pattern, page_title, re.IGNORECASE)
             if match:
                 return match.group(1).strip().capitalize()
 
-    # Content-based
     if page_text:
         for pattern in [r"[Mm]achine[:\s]+(\w+)", r"[Bb]ox[:\s]+(\w+)"]:
             match = re.search(pattern, page_text[:1000])
@@ -271,7 +260,6 @@ def extract_box_name(url: str, page_text: str, page_title: str) -> str:
                 if name.lower() not in ("the", "this", "a", "an", "is", "setup", "name"):
                     return name.capitalize()
 
-    # Final fallback
     segments = [s for s in path.strip("/").split("/") if s]
     if segments:
         name = segments[-1]
@@ -302,7 +290,6 @@ def fetch_page(url: str) -> tuple[str, str, str]:
     except requests.exceptions.RequestException as e:
         return "", "", f"Failed to fetch {url}: {e}"
 
-    # Raw text/markdown — return as-is
     if is_raw_text_url(url):
         raw_text = resp.text
         title = ""
@@ -316,7 +303,6 @@ def fetch_page(url: str) -> tuple[str, str, str]:
         raw_text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", raw_text, flags=re.DOTALL)
         return raw_text, title, ""
 
-    # HTML page
     soup = BeautifulSoup(resp.text, "html.parser")
     title = soup.title.string.strip() if soup.title and soup.title.string else ""
 
@@ -390,24 +376,24 @@ Layer: {layer} — {layer_cfg['name']}
 
 def save_raw_file(content: str, box_name: str, source: str,
                   platform: str, layer: int, url: str) -> Path:
-    """Save to platform-specific directory. Never overwrites."""
+    """Save to raw/{platform}/layer{N}/{boxname}.txt — never overwrites."""
 
-    layer_cfg = LAYER_CONFIG[layer]
+    layer_dir = LAYER_NAMES[layer]
 
-    # Save to platform directory (htb/, vulnhub/, thm/, other/)
-    subdir = RAW_DIR / platform
+    # Path: raw/vulnhub/layer1/boxname.txt
+    subdir = RAW_DIR / platform / layer_dir
     subdir.mkdir(parents=True, exist_ok=True)
 
-    # Unique filename: source_boxname.txt
-    safe_source = re.sub(r"[^a-z0-9]", "_", source.lower())
-    safe_name = re.sub(r"[^a-z0-9]", "_", box_name.lower())
-    base_filename = f"{safe_source}_{safe_name}"
+    # Clean filename — just the box name, no source prefix
+    safe_name = re.sub(r"[^a-z0-9]", "_", box_name.lower()).strip("_")
+    if not safe_name:
+        safe_name = "unknown"
 
-    filename = f"{base_filename}.txt"
+    filename = f"{safe_name}.txt"
     filepath = subdir / filename
     counter = 2
     while filepath.exists():
-        filename = f"{base_filename}_{counter}.txt"
+        filename = f"{safe_name}_{counter}.txt"
         filepath = subdir / filename
         counter += 1
 
@@ -415,6 +401,8 @@ def save_raw_file(content: str, box_name: str, source: str,
         "htb": "HTB", "vulnhub": "VulnHub",
         "thm": "TryHackMe", "other": "Other"
     }.get(platform, platform.upper())
+
+    layer_cfg = LAYER_CONFIG[layer]
 
     header = f"""{'=' * 75}
 {platform_display}: {box_name.upper()} — {layer_cfg['name'].upper()} (Layer {layer})
@@ -476,11 +464,10 @@ def process_url(url: str, layer: int, use_ai: bool = True) -> bool:
     print(f"  Source: {source}")
     print(f"  Layer: {layer} — {LAYER_CONFIG[layer]['name']}")
     print(f"  Content: {len(raw_text.split())} words")
-    print(f"  Type: {'Raw markdown' if is_raw_text_url(url) else 'HTML page'}")
-    print(f"  Saving to: raw/{platform}/")
+    print(f"  Saving to: raw/{platform}/{LAYER_NAMES[layer]}/")
 
     if len(raw_text.split()) < 100:
-        print(f"  WARNING: Very short content — may not extract well")
+        print(f"  WARNING: Very short content")
 
     if use_ai:
         print(f"  Extracting {LAYER_CONFIG[layer]['focus']}...")
@@ -510,11 +497,11 @@ def process_links_file(links_file: str, layer: int, use_ai: bool = True):
 
     layer_cfg = LAYER_CONFIG[layer]
     print(f"\n{'═' * 60}")
-    print(f"  ClawStrike Writeup Fetcher v3")
+    print(f"  ClawStrike Writeup Fetcher v4")
     print(f"  Layer {layer}: {layer_cfg['name']}")
     print(f"  URLs to process: {len(urls)}")
     print(f"  AI extraction: {'enabled' if use_ai else 'disabled'}")
-    print(f"  Output: auto-sorted by platform (htb/vulnhub/thm/other)")
+    print(f"  Output: raw/{{platform}}/{LAYER_NAMES[layer]}/")
     print(f"{'═' * 60}")
 
     success = 0
@@ -536,24 +523,31 @@ def process_links_file(links_file: str, layer: int, use_ai: bool = True):
 
     print(f"\n{'═' * 60}")
     print(f"  Done! {success} succeeded, {failed} failed")
-    print(f"  Files auto-sorted into: raw/htb/, raw/vulnhub/, raw/thm/, raw/other/")
+    print(f"  Output structure: raw/{{platform}}/{LAYER_NAMES[layer]}/")
     print(f"")
     print(f"  Next steps:")
-    print(f"  1. Quality check:  python scripts/quality_check.py raw/vulnhub/ --layer {layer}")
-    print(f"  2. Extract:        python scripts/writeup_extractor.py raw/vulnhub/")
+    print(f"  1. Quality check:  python scripts/quality_check.py raw/vulnhub/{LAYER_NAMES[layer]}/ --layer {layer}")
+    print(f"  2. Extract:        python scripts/writeup_extractor.py raw/vulnhub/{LAYER_NAMES[layer]}/")
     print(f"{'═' * 60}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ClawStrike Writeup Fetcher v3",
+        description="ClawStrike Writeup Fetcher v4",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Output structure:
+  raw/{platform}/layer{N}/{boxname}.txt
+
+  Examples:
+    raw/vulnhub/layer1/jigsaw.txt
+    raw/htb/layer2/lame.txt
+    raw/vulnhub/layer3/dc6.txt
+
 Examples:
-  python scripts/writeup_fetcher.py links/htb_boxes.txt --layer 1
-  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 1
+  python scripts/writeup_fetcher.py links/htb.txt --layer 1
+  python scripts/writeup_fetcher.py links/vulnhub.txt --layer 2
   python scripts/writeup_fetcher.py links/vulnhub.txt --layer 3
-  python scripts/writeup_fetcher.py links/mixed.txt --layer 1  (auto-sorts by platform)
 """,
     )
 
@@ -567,7 +561,6 @@ Examples:
 
     if not os.environ.get("ANTHROPIC_API_KEY") and not args.no_ai:
         print("WARNING: ANTHROPIC_API_KEY not set. AI extraction will be skipped.")
-        print("Set it with: export ANTHROPIC_API_KEY=your_key_here\n")
 
     process_links_file(args.links_file, args.layer, use_ai=not args.no_ai)
 
