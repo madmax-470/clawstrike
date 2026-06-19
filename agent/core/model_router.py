@@ -124,6 +124,25 @@ class ModelRouter:
         Dispatches to the correct provider implementation, with a JSON
         fallback for models that don't support native function calling.
         """
+        return self.call_with_tools_text(messages, tools, system, max_tokens)[1]
+
+    def call_with_tools_text(
+        self,
+        messages: list,
+        tools: list,
+        system: str = "",
+        max_tokens: int = 4096,
+    ) -> tuple[str, list]:
+        """
+        Like :meth:`call_with_tools`, but returns both the assistant's prose and
+        its tool calls in a single round-trip::
+
+            (text, [{"name": "tool_name", "input": {...}}, ...])
+
+        ``text`` is the assistant's natural-language content (empty string if the
+        model returned only tool calls). This lets callers answer a conversational
+        turn without a second model call when no tool was requested.
+        """
         provider = self._config.provider
 
         if provider == "anthropic":
@@ -137,7 +156,7 @@ class ModelRouter:
 
     def _anthropic_tools(
         self, messages: list, tools: list, system: str, max_tokens: int,
-    ) -> list:
+    ) -> tuple[str, list]:
         client = self._get_client()
         response = client.messages.create(
             model=self._config.model,
@@ -147,15 +166,18 @@ class ModelRouter:
             system=system,
             messages=messages,
         )
+        text_parts = []
         results = []
         for block in response.content:
             if block.type == "tool_use":
                 results.append({"name": block.name, "input": block.input})
-        return results
+            elif block.type == "text":
+                text_parts.append(block.text)
+        return "".join(text_parts).strip(), results
 
     def _openai_tools(
         self, messages: list, tools: list, system: str, max_tokens: int,
-    ) -> list:
+    ) -> tuple[str, list]:
         # Convert Anthropic tool format → OpenAI function format
         oai_tools = [
             {
@@ -183,8 +205,10 @@ class ModelRouter:
             messages=msgs,
         )
 
+        message = response.choices[0].message
+        text = (message.content or "").strip()
         results = []
-        tool_calls = response.choices[0].message.tool_calls or []
+        tool_calls = message.tool_calls or []
         for tc in tool_calls:
             try:
                 results.append({
@@ -193,11 +217,11 @@ class ModelRouter:
                 })
             except Exception:
                 continue
-        return results
+        return text, results
 
     def _json_fallback(
         self, messages: list, tools: list, system: str, max_tokens: int,
-    ) -> list:
+    ) -> tuple[str, list]:
         """
         For models without native function calling.
         Instructs the model to use <tool_call>name({json})</tool_call> tags.
@@ -228,7 +252,7 @@ class ModelRouter:
                 })
             except Exception:
                 continue
-        return results
+        return text, results
 
     # ── Legacy compatibility ───────────────────────────────────────────────────
     # loop.py and other callers use router.chat(task_type, system, messages, ...)
