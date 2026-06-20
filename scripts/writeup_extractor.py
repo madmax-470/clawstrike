@@ -1,18 +1,23 @@
 """
-ClawStrike — Writeup Extractor (v2)
+ClawStrike — Writeup Extractor (v3)
 =====================================
 Takes raw writeup text files and uses Claude API to extract structured
-training data. Presents the extraction for human review before saving.
+training data. Supports manual review or auto-approve mode.
 
 Now layer-aware — saves to processed/{layer_name}/ automatically.
 
 Usage:
-  python scripts/writeup_extractor.py <path> [--layer N]
+  python scripts/writeup_extractor.py <path> [--layer N] [--auto]
 
 Examples:
+  # Manual review (one by one)
   python scripts/writeup_extractor.py raw/vulnhub/layer1/ --layer 1
-  python scripts/writeup_extractor.py raw/htb/layer2/ --layer 2
-  python scripts/writeup_extractor.py raw/vulnhub/layer3/dc6.txt --layer 3
+
+  # Auto mode — approve all, get summary report
+  python scripts/writeup_extractor.py raw/vulnhub/layer2/ --layer 2 --auto
+
+  # Single file
+  python scripts/writeup_extractor.py raw/htb/layer3/lame.txt --layer 3
 """
 
 import json
@@ -306,9 +311,12 @@ def convert_layer1(data: dict) -> list[dict]:
     """Convert Layer 1 extraction to training examples."""
     examples = []
 
+    ports = data.get("ports") or []
+    priorities = data.get("priorities") or []
+
     ports_text = "\n".join(
         f"- {p['port']}/{p['proto']} {p['service']} {p.get('version', 'unknown')}"
-        for p in data.get("ports", [])
+        for p in ports
     )
 
     if not ports_text:
@@ -322,8 +330,8 @@ def convert_layer1(data: dict) -> list[dict]:
     )
 
     reasoning_lines = ["Thought: Analyzing discovered services by exploit probability.\n"]
-    for i, p in enumerate(data.get("priorities", []), 1):
-        reasoning_lines.append(f"{i}. {p['service']} — {p['reasoning']}")
+    for i, p in enumerate(priorities, 1):
+        reasoning_lines.append(f"{i}. {p.get('service', '?')} — {p.get('reasoning', '?')}")
 
     reasoning_lines.append(f"\nAction: {data.get('first_action', 'enumerate further')}")
     if data.get("fallback"):
@@ -394,16 +402,16 @@ def convert_layer2(data: dict) -> list[dict]:
     """Convert Layer 2 extraction to training examples."""
     examples = []
 
-    for tool_entry in data.get("tool_outputs", []):
+    for tool_entry in (data.get("tool_outputs") or []):
         instruction = (
             f"You are a penetration tester conducting authorized testing.\n"
-            f"Parse the following {tool_entry['tool']} output and extract key findings.\n\n"
+            f"Parse the following {tool_entry.get('tool', 'unknown')} output and extract key findings.\n\n"
             f"Command: {tool_entry.get('command', 'unknown')}\n\n"
             f"Raw output:\n{tool_entry.get('raw_output', '')}"
         )
 
         findings_text = []
-        for i, f in enumerate(tool_entry.get("findings", []), 1):
+        for i, f in enumerate(tool_entry.get("findings") or [], 1):
             findings_text.append(
                 f"{i}. [{f.get('severity', 'INFO')}] {f.get('finding', '')}\n"
                 f"   → {f.get('reasoning', '')}"
@@ -434,7 +442,7 @@ def convert_layer3(data: dict) -> list[dict]:
     """Convert Layer 3 extraction to training examples."""
     examples = []
 
-    for failure in data.get("failures", []):
+    for failure in (data.get("failures") or []):
         instruction = (
             f"You are a penetration tester conducting authorized testing.\n"
             f"Your action did not succeed. Decide what to do next.\n\n"
@@ -471,12 +479,12 @@ def convert_layer4(data: dict) -> list[dict]:
     """Convert Layer 4 extraction to training examples."""
     examples = []
 
-    vulns = data.get("vulnerabilities_found", [])
+    vulns = data.get("vulnerabilities_found") or []
     if not vulns:
         return examples
 
     vuln_text = "\n".join(
-        f"- {v['service']}: {v['vulnerability']}" for v in vulns
+        f"- {v.get('service', '?')}: {v.get('vulnerability', '?')}" for v in vulns
     )
 
     instruction = (
@@ -519,9 +527,9 @@ def convert_layer5(data: dict) -> list[dict]:
     """Convert Layer 5 extraction to training examples."""
     examples = []
 
-    initial = data.get("initial_access", {})
-    steps = data.get("enumeration_steps", [])
-    privesc = data.get("privesc_vector", {})
+    initial = data.get("initial_access") or {}
+    steps = data.get("enumeration_steps") or []
+    privesc = data.get("privesc_vector") or {}
 
     if not initial or not privesc:
         return examples
@@ -559,7 +567,7 @@ def convert_layer5(data: dict) -> list[dict]:
         f"Command: {privesc.get('command', '')}"
     )
 
-    failed = data.get("failed_privesc", [])
+    failed = data.get("failed_privesc") or []
     if failed:
         output_parts.append("\nFailed attempts:")
         for f in failed:
@@ -582,7 +590,7 @@ def convert_layer6(data: dict) -> list[dict]:
     """Convert Layer 6 extraction to training examples."""
     examples = []
 
-    for finding in data.get("findings", []):
+    for finding in (data.get("findings") or []):
         evidence = finding.get("evidence", "")
         if isinstance(evidence, list):
             evidence = "\n".join(evidence)
@@ -622,7 +630,7 @@ def convert_layer7(data: dict) -> list[dict]:
     """Convert Layer 7 extraction to training examples."""
     examples = []
 
-    for decision in data.get("scope_decisions", []):
+    for decision in (data.get("scope_decisions") or []):
         instruction = (
             f"You are a penetration tester conducting authorized testing.\n"
             f"Evaluate the following situation and decide the correct action.\n\n"
@@ -645,7 +653,7 @@ def convert_layer7(data: dict) -> list[dict]:
             }
         })
 
-    for discovery in data.get("out_of_scope_discoveries", []):
+    for discovery in (data.get("out_of_scope_discoveries") or []):
         instruction = (
             f"You are a penetration tester conducting authorized testing.\n"
             f"During enumeration, you discovered something outside your authorized scope.\n\n"
@@ -807,52 +815,173 @@ def save_examples(examples: list[dict], box_name: str, layer: int):
         }) + "\n")
 
 
-def process_file(filepath: str, layer: int):
-    """Process a single writeup file."""
+def load_processed_files(layer: int) -> set:
+    """Load set of already-processed filenames for this layer."""
+    tracker = METADATA_DIR / f"processed_files_layer{layer}.txt"
+    if tracker.exists():
+        return set(line.strip() for line in tracker.read_text().splitlines() if line.strip())
+    return set()
+
+
+def rebuild_tracker_from_existing(layer: int) -> set:
+    """Scan existing processed JSONL files and rebuild the tracker.
+    Called once on first run to catch files processed before tracking existed."""
+    tracker = METADATA_DIR / f"processed_files_layer{layer}.txt"
+
+    # If tracker already exists, don't rebuild
+    if tracker.exists():
+        return load_processed_files(layer)
+
+    # Check the layer tracker JSONL in metadata for previously processed boxes
+    layer_dir = LAYER_OUTPUT_DIRS[layer]
+    layer_tracker = METADATA_DIR / f"{layer_dir}_tracker.jsonl"
+    existing = set()
+
+    if layer_tracker.exists():
+        try:
+            with open(layer_tracker) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        box = entry.get("box_name", "")
+                        if box:
+                            safe = re.sub(r"[^a-z0-9]", "_", box.lower()).strip("_")
+                            existing.add(f"{safe}.txt")
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            pass
+
+    # Also check which JSONL files already exist in processed/
+    output_dir = PROCESSED_DIR / layer_dir
+    if output_dir.exists():
+        for jsonl_file in output_dir.glob("*.jsonl"):
+            # If lame.jsonl exists, then lame.txt was processed
+            existing.add(jsonl_file.stem + ".txt")
+
+    if existing:
+        with open(tracker, "w") as f:
+            f.write("\n".join(sorted(existing)) + "\n")
+        print(f"  [info] Found {len(existing)} previously processed files")
+
+    return existing
+
+
+def mark_processed(filename: str, layer: int):
+    """Mark a file as processed for this layer."""
+    tracker = METADATA_DIR / f"processed_files_layer{layer}.txt"
+    with open(tracker, "a") as f:
+        f.write(filename + "\n")
+
+
+def process_file(filepath: str, layer: int, auto: bool = False, processed_set: set = None) -> dict:
+    """Process a single writeup file. Returns result dict for reporting."""
+    result = {"file": Path(filepath).name, "status": "unknown", "examples": 0, "box": "unknown"}
+
     path = Path(filepath)
     if not path.exists():
         print(f"File not found: {filepath}")
-        return
+        result["status"] = "file_not_found"
+        return result
+
+    # Dedup check
+    if processed_set is not None and path.name in processed_set:
+        if auto:
+            print(f"  {path.name}... SKIP (already processed)")
+        else:
+            print(f"\nSkipping {path.name} — already processed for Layer {layer}")
+        result["status"] = "duplicate"
+        return result
 
     writeup_text = path.read_text()
     word_count = len(writeup_text.split())
-    print(f"\nLoaded: {path.name} ({word_count} words)")
+
+    if auto:
+        print(f"  {path.name} ({word_count} words)...", end=" ", flush=True)
+    else:
+        print(f"\nLoaded: {path.name} ({word_count} words)")
 
     if word_count < 50:
-        print("WARNING: Very short. May not extract well.")
+        if auto:
+            print("SKIP (too short)")
+            result["status"] = "too_short"
+            return result
+        else:
+            print("WARNING: Very short. May not extract well.")
 
-    print(f"Extracting Layer {layer} ({LAYER_NAMES[layer]}) data...")
-    data = extract_from_writeup(writeup_text, layer)
+    if not auto:
+        print(f"Extracting Layer {layer} ({LAYER_NAMES[layer]}) data...")
+
+    try:
+        data = extract_from_writeup(writeup_text, layer)
+    except Exception as e:
+        if auto:
+            print(f"FAIL (API error: {e})")
+        else:
+            print(f"API error: {e}")
+        result["status"] = "api_error"
+        return result
 
     if not data:
-        print("Extraction failed.")
-        return
+        if auto:
+            print("FAIL (extraction error)")
+        else:
+            print("Extraction failed.")
+        result["status"] = "extraction_failed"
+        return result
 
-    choice = review_and_confirm(data, layer)
+    result["box"] = data.get("box_name", "unknown")
 
-    if choice == "s":
-        print("Skipped.")
-        return
+    # In auto mode, skip review and approve everything
+    if not auto:
+        choice = review_and_confirm(data, layer)
 
-    if choice == "e":
-        edit_path = RAW_DIR / f"{data.get('box_name', 'unknown').lower()}_layer{layer}_extracted.json"
-        with open(edit_path, "w") as f:
-            json.dump(data, f, indent=2)
-        print(f"Saved for editing → {edit_path}")
-        return
+        if choice == "s":
+            print("Skipped.")
+            result["status"] = "skipped"
+            return result
+
+        if choice == "e":
+            edit_path = RAW_DIR / f"{data.get('box_name', 'unknown').lower()}_layer{layer}_extracted.json"
+            with open(edit_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"Saved for editing → {edit_path}")
+            result["status"] = "saved_for_edit"
+            return result
 
     converter = CONVERTERS[layer]
-    examples = converter(data)
+    try:
+        examples = converter(data)
+    except Exception as e:
+        if auto:
+            print(f"FAIL (converter error: {e})")
+        else:
+            print(f"Converter error: {e}")
+        result["status"] = "converter_error"
+        return result
 
     if not examples:
-        print("No examples generated — extraction may be incomplete.")
-        return
+        if auto:
+            print("SKIP (no examples generated)")
+        else:
+            print("No examples generated — extraction may be incomplete.")
+        result["status"] = "no_examples"
+        return result
 
     save_examples(examples, data.get("box_name", "unknown"), layer)
-    print(f"✓ {len(examples)} training examples generated.")
+    mark_processed(Path(filepath).name, layer)
+    result["status"] = "success"
+    result["examples"] = len(examples)
+
+    if auto:
+        print(f"✓ {len(examples)} examples")
+    else:
+        print(f"✓ {len(examples)} training examples generated.")
+
+    return result
 
 
-def process_directory(dirpath: str, layer: int):
+def process_directory(dirpath: str, layer: int, auto: bool = False):
     """Process all .txt/.md files in a directory."""
     path = Path(dirpath)
     files = sorted(path.glob("*.txt")) + sorted(path.glob("*.md"))
@@ -861,11 +990,107 @@ def process_directory(dirpath: str, layer: int):
         print(f"No .txt or .md files found in {dirpath}")
         return
 
-    print(f"Found {len(files)} files\n")
+    # Load already-processed files (auto-rebuilds tracker on first run)
+    processed_set = rebuild_tracker_from_existing(layer)
+    new_files = [f for f in files if f.name not in processed_set]
 
-    for f in files:
-        print(f"\n{'─' * 40}")
-        process_file(str(f), layer)
+    layer_name = LAYER_NAMES[layer]
+    print(f"\n{'═' * 60}")
+    print(f"  ClawStrike Extractor {'(AUTO MODE)' if auto else ''}")
+    print(f"  Layer {layer}: {layer_name}")
+    print(f"  Total files found:    {len(files)}")
+    print(f"  Already processed:    {len(files) - len(new_files)}")
+    print(f"  New files to process: {len(new_files)}")
+    print(f"  Mode: {'auto-approve' if auto else 'manual review'}")
+    print(f"  Output: processed/{LAYER_OUTPUT_DIRS[layer]}/")
+    print(f"{'═' * 60}\n")
+
+    if not new_files:
+        print("  Nothing new to process. All files already extracted.")
+        return
+
+    results = []
+    for i, f in enumerate(new_files, 1):
+        if auto:
+            print(f"  [{i}/{len(new_files)}]", end=" ")
+        else:
+            print(f"\n{'─' * 40}")
+        result = process_file(str(f), layer, auto, processed_set)
+        results.append(result)
+
+    # ── Summary Report ──────────────────────────────────────────
+    total = len(results)
+    succeeded = [r for r in results if r["status"] == "success"]
+    failed_extract = [r for r in results if r["status"] == "extraction_failed"]
+    no_examples = [r for r in results if r["status"] == "no_examples"]
+    too_short = [r for r in results if r["status"] == "too_short"]
+    skipped = [r for r in results if r["status"] == "skipped"]
+    duplicates = [r for r in results if r["status"] == "duplicate"]
+    api_errors = [r for r in results if r["status"] == "api_error"]
+    converter_errors = [r for r in results if r["status"] == "converter_error"]
+    total_examples = sum(r["examples"] for r in results)
+
+    print(f"\n{'═' * 60}")
+    print(f"  EXTRACTION REPORT — Layer {layer}: {layer_name}")
+    print(f"{'═' * 60}")
+    print(f"  Files in directory:       {len(files)}")
+    print(f"  Previously processed:     {len(files) - len(new_files)}")
+    print(f"  New files processed:      {total}")
+    print(f"  {'─' * 40}")
+    print(f"  ✅ Successful:             {len(succeeded)}")
+    if failed_extract:
+        print(f"  ❌ Extraction failed:      {len(failed_extract)}")
+    if api_errors:
+        print(f"  ❌ API errors:             {len(api_errors)}")
+    if converter_errors:
+        print(f"  ❌ Converter errors:       {len(converter_errors)}")
+    if no_examples:
+        print(f"  ⚠️  No examples generated:  {len(no_examples)}")
+    if too_short:
+        print(f"  ⏭️  Too short (skipped):    {len(too_short)}")
+    if skipped:
+        print(f"  ⏭️  Manually skipped:       {len(skipped)}")
+    if duplicates:
+        print(f"  🔄 Duplicates skipped:     {len(duplicates)}")
+    print(f"  {'─' * 40}")
+    print(f"  📊 New training examples:  {total_examples}")
+    print(f"  📁 Saved to: processed/{LAYER_OUTPUT_DIRS[layer]}/")
+
+    if failed_extract or api_errors or converter_errors:
+        print(f"\n  Failed files:")
+        for r in failed_extract + api_errors + converter_errors:
+            print(f"    ✗ {r['file']} ({r['status']})")
+
+    if no_examples:
+        print(f"\n  No examples generated:")
+        for r in no_examples:
+            print(f"    ⚠ {r['file']} ({r['box']})")
+
+    # Save report to metadata
+    report_path = METADATA_DIR / f"extraction_report_layer{layer}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    report = {
+        "layer": layer,
+        "layer_name": layer_name,
+        "timestamp": datetime.now().isoformat(),
+        "total_in_directory": len(files),
+        "previously_processed": len(files) - len(new_files),
+        "new_processed": total,
+        "successful": len(succeeded),
+        "failed": len(failed_extract),
+        "api_errors": len(api_errors),
+        "converter_errors": len(converter_errors),
+        "no_examples": len(no_examples),
+        "too_short": len(too_short),
+        "skipped": len(skipped),
+        "duplicates": len(duplicates),
+        "total_examples": total_examples,
+        "results": results,
+    }
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"\n  📋 Report saved: {report_path}")
+    print(f"{'═' * 60}\n")
 
 
 def main():
@@ -874,9 +1099,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Manual review mode (one by one)
   python scripts/writeup_extractor.py raw/vulnhub/layer1/ --layer 1
-  python scripts/writeup_extractor.py raw/htb/layer2/ --layer 2
-  python scripts/writeup_extractor.py raw/vulnhub/layer3/dc6.txt --layer 3
+
+  # Auto mode — approve all, get report at end
+  python scripts/writeup_extractor.py raw/vulnhub/layer2/ --layer 2 --auto
+
+  # Single file
+  python scripts/writeup_extractor.py raw/htb/layer3/lame.txt --layer 3
+
+  # Reprocess everything (clear dedup tracker first)
+  python scripts/writeup_extractor.py raw/vulnhub/layer1/ --layer 1 --auto --reset
 
 Output:
   processed/layer1_recon/     (Layer 1)
@@ -892,6 +1125,10 @@ Output:
     parser.add_argument("path", help="File or directory to process")
     parser.add_argument("--layer", type=int, default=1, choices=range(1, 8),
                         help="Which layer to extract (1-7, default: 1)")
+    parser.add_argument("--auto", action="store_true",
+                        help="Auto-approve all extractions, print summary report at end")
+    parser.add_argument("--reset", action="store_true",
+                        help="Clear dedup tracker and reprocess everything from scratch")
 
     args = parser.parse_args()
 
@@ -900,11 +1137,19 @@ Output:
         print("  export ANTHROPIC_API_KEY=your_key_here")
         sys.exit(1)
 
+    # Reset tracker if requested
+    if args.reset:
+        tracker = METADATA_DIR / f"processed_files_layer{args.layer}.txt"
+        if tracker.exists():
+            tracker.unlink()
+            print(f"  [reset] Cleared tracker for Layer {args.layer}")
+
     target = Path(args.path)
     if target.is_dir():
-        process_directory(str(target), args.layer)
+        process_directory(str(target), args.layer, args.auto)
     else:
-        process_file(str(target), args.layer)
+        processed_set = rebuild_tracker_from_existing(args.layer)
+        process_file(str(target), args.layer, args.auto, processed_set)
 
 
 if __name__ == "__main__":
